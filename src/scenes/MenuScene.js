@@ -96,7 +96,10 @@ export default class MenuScene extends Phaser.Scene {
     this.positionLayout();
     this.scale.on('resize', () => this.positionLayout());
 
-    this.events.on('shutdown', () => this.destroyHtmlInput());
+    this.events.on('shutdown', () => {
+      this.destroyHtmlInput();
+      this.destroyCharacterHtmlInput();
+    });
   }
 
   positionLayout() {
@@ -107,6 +110,7 @@ export default class MenuScene extends Phaser.Scene {
     this.title.setPosition(cx, cy - 200);
     this.startBtn.setPosition(cx, cy);
     this.modsBtn.setPosition(cx, cy + 56);
+    this.characterBtn.setPosition(cx, cy + 96);
     this.newGameBtn.setPosition(cx, cy - 30);
     this.loadGameBtn.setPosition(cx, cy + 35);
     this.backBtn.setPosition(cx, cy + 100);
@@ -116,6 +120,9 @@ export default class MenuScene extends Phaser.Scene {
     if (this.htmlInput) {
       this.positionHtmlInput();
     }
+    if (this.characterHtmlInput) {
+      this.positionCharacterHtmlInput();
+    }
   }
 
   showStageSelect() {
@@ -123,6 +130,7 @@ export default class MenuScene extends Phaser.Scene {
     this.stage = 'select';
     this.startBtn.setVisible(false);
     this.modsBtn.setVisible(false);
+    this.characterBtn.setVisible(false);
     this.newGameBtn.setVisible(true);
     this.loadGameBtn.setVisible(true);
     this.backBtn.setVisible(true);
@@ -130,13 +138,16 @@ export default class MenuScene extends Phaser.Scene {
     this.worldListContainer.setVisible(false);
     this.worldListBackBtn.setVisible(false);
     this.modsContainer.setVisible(false);
+    this.characterContainer.setVisible(false);
   }
 
   showStart() {
     this.destroyHtmlInput();
+    this.destroyCharacterHtmlInput();
     this.stage = 'start';
     this.startBtn.setVisible(true);
     this.modsBtn.setVisible(true);
+    this.characterBtn.setVisible(true);
     this.newGameBtn.setVisible(false);
     this.loadGameBtn.setVisible(false);
     this.backBtn.setVisible(false);
@@ -144,6 +155,7 @@ export default class MenuScene extends Phaser.Scene {
     this.worldListContainer.setVisible(false);
     this.worldListBackBtn.setVisible(false);
     this.modsContainer.setVisible(false);
+    this.characterContainer.setVisible(false);
   }
 
   showModsScreen() {
@@ -151,6 +163,7 @@ export default class MenuScene extends Phaser.Scene {
     this.stage = 'mods';
     this.startBtn.setVisible(false);
     this.modsBtn.setVisible(false);
+    this.characterBtn.setVisible(false);
 
     this.modsContainer.removeAll(true);
     const { width, height } = this.scale;
@@ -363,6 +376,246 @@ export default class MenuScene extends Phaser.Scene {
     const id = createWorld(name, { peaceful: this.peacefulMode });
     this.destroyHtmlInput();
     this.scene.start('BootScene', { mode: 'new', worldId: id, worldName: name, peaceful: this.peacefulMode });
+  }
+
+  showCharacterScreen() {
+    this.destroyHtmlInput();
+    this.stage = 'character';
+    this.startBtn.setVisible(false);
+    this.modsBtn.setVisible(false);
+    this.characterBtn.setVisible(false);
+
+    this.characterContainer.removeAll(true);
+    this.character = loadCharacter();
+    this.generateCharacterPreviewTexture();
+
+    const { width, height } = this.scale;
+    const cx = width / 2;
+    const cy = height / 2;
+    const panelLeft = cx - 220;
+    const panelRight = cx + 60;
+
+    const heading = this.add.text(cx, cy - 170, 'Character', {
+      fontFamily: 'Arial', fontSize: '28px', color: '#ffffff', fontStyle: 'bold'
+    }).setOrigin(0.5);
+
+    // Live preview on the left side.
+    this.previewSprite = this.add.image(panelLeft, cy - 20, 'character-preview').setScale(3);
+    const previewLabel = this.add.text(panelLeft, cy + 60, '', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#ffffff', fontStyle: 'bold'
+    }).setOrigin(0.5);
+    this.previewLabel = previewLabel;
+
+    // Name field.
+    const nameLabel = this.add.text(panelRight, cy - 130, 'Name', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#cccccc'
+    }).setOrigin(0, 0.5);
+    this.createCharacterHtmlInput();
+
+    // Gender toggle.
+    const genderLabel = this.add.text(panelRight, cy - 78, 'Gender', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#cccccc'
+    }).setOrigin(0, 0.5);
+    const genderOffStyle = { fontFamily: 'Arial', fontSize: '12px', color: '#aaaaaa', backgroundColor: '#242424', padding: { x: 10, y: 5 } };
+    const genderOnStyle = { fontFamily: 'Arial', fontSize: '12px', color: '#ffffff', backgroundColor: '#3a6b3a', padding: { x: 10, y: 5 } };
+    this.maleBtn = this.add.text(panelRight, cy - 58, 'Male', genderOffStyle).setOrigin(0, 0)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.setCharacterGender('male'));
+    this.femaleBtn = this.add.text(panelRight + 70, cy - 58, 'Female', genderOffStyle).setOrigin(0, 0)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.setCharacterGender('female'));
+    this.genderOnStyle = genderOnStyle;
+    this.genderOffStyle = genderOffStyle;
+
+    // Hair style picker.
+    const hairLabel = this.add.text(panelRight, cy - 20, 'Hair Style', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#cccccc'
+    }).setOrigin(0, 0.5);
+    this.hairBtns = {};
+    HAIR_STYLES.forEach((h, i) => {
+      const btn = this.add.text(panelRight + (i % 2) * 75, cy + (Math.floor(i / 2) * 26), h.label, genderOffStyle)
+        .setOrigin(0, 0)
+        .setInteractive({ useHandCursor: true })
+        .on('pointerdown', () => this.setCharacterHair(h.id));
+      this.hairBtns[h.id] = btn;
+    });
+
+    // Color swatches.
+    const colorLabel = this.add.text(panelRight, cy + 58, 'Color', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#cccccc'
+    }).setOrigin(0, 0.5);
+    this.colorSwatches = CHARACTER_COLORS.map((color, i) => {
+      const swatch = this.add.rectangle(panelRight + i * 26, cy + 78, 20, 20, color, 1)
+        .setOrigin(0, 0)
+        .setInteractive({ useHandCursor: true })
+        .on('pointerdown', () => this.setCharacterColor(color));
+      return { color, swatch };
+    });
+
+    const backBtn = this.add.text(cx, cy + 150, '< Back', {
+      fontFamily: 'Arial', fontSize: '14px', color: '#aaaaaa', backgroundColor: '#242424', padding: { x: 10, y: 6 }
+    }).setOrigin(0.5)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.saveAndExitCharacterScreen());
+
+    this.characterContainer.add([
+      heading, this.previewSprite, previewLabel, nameLabel, genderLabel, this.maleBtn, this.femaleBtn,
+      hairLabel, ...Object.values(this.hairBtns), colorLabel,
+      ...this.colorSwatches.map(s => s.swatch), backBtn
+    ]);
+    this.characterContainer.setVisible(true);
+
+    this.refreshCharacterUI();
+  }
+
+  setCharacterGender(gender) {
+    this.character.gender = gender;
+    this.refreshCharacterUI();
+  }
+
+  setCharacterHair(hair) {
+    this.character.hair = hair;
+    this.refreshCharacterUI();
+  }
+
+  setCharacterColor(color) {
+    this.character.color = color;
+    this.refreshCharacterUI();
+  }
+
+  refreshCharacterUI() {
+    this.maleBtn.setStyle(this.character.gender === 'male' ? this.genderOnStyle : this.genderOffStyle);
+    this.femaleBtn.setStyle(this.character.gender === 'female' ? this.genderOnStyle : this.genderOffStyle);
+
+    Object.entries(this.hairBtns).forEach(([id, btn]) => {
+      btn.setStyle(this.character.hair === id ? this.genderOnStyle : this.genderOffStyle);
+    });
+
+    this.colorSwatches.forEach(({ color, swatch }) => {
+      swatch.setStrokeStyle(this.character.color === color ? 3 : 0, 0xffe066);
+    });
+
+    this.generateCharacterPreviewTexture();
+    this.previewSprite.setTexture('character-preview');
+
+    const name = this.characterHtmlInput ? this.characterHtmlInput.value.trim() : this.character.name;
+    this.previewLabel.setText(name || 'Player');
+  }
+
+  generateCharacterPreviewTexture() {
+    if (this.textures.exists('character-preview')) {
+      this.textures.remove('character-preview');
+    }
+
+    const size = 40;
+    const g = this.add.graphics();
+    const cx = size / 2;
+
+    g.fillStyle(0x000000, 0.3);
+    g.fillEllipse(cx, size - 4, size * 0.5, size * 0.16);
+
+    g.fillStyle(this.character.color, 1);
+    if (this.character.gender === 'female') {
+      const top = size * 0.42, bodyH = 16, shoulderW = 15, waistW = 11, hemW = 17;
+      g.beginPath();
+      g.moveTo(cx - shoulderW / 2, top);
+      g.lineTo(cx + shoulderW / 2, top);
+      g.lineTo(cx + waistW / 2, top + bodyH * 0.55);
+      g.lineTo(cx + hemW / 2, top + bodyH);
+      g.lineTo(cx - hemW / 2, top + bodyH);
+      g.lineTo(cx - waistW / 2, top + bodyH * 0.55);
+      g.closePath();
+      g.fillPath();
+    } else {
+      g.fillRoundedRect(cx - 10, size * 0.42, 20, 16, 3);
+    }
+
+    g.fillStyle(0xe8b98a, 1);
+    g.fillCircle(cx, size * 0.36, 10);
+
+    const hairColor = 0x3a2a1e;
+    if (this.character.hair === 'long') {
+      g.fillStyle(hairColor, 1);
+      g.fillEllipse(cx, size * 0.27, 21, 13);
+      g.fillEllipse(cx - 9, size * 0.42, 5, 10);
+      g.fillEllipse(cx + 9, size * 0.42, 5, 10);
+    } else if (this.character.hair === 'ponytail') {
+      g.fillStyle(hairColor, 1);
+      g.fillEllipse(cx, size * 0.28, 20, 12);
+      g.fillEllipse(cx + 10, size * 0.36, 4, 9);
+    } else if (this.character.hair === 'bald') {
+      // No hair.
+    } else {
+      g.fillStyle(hairColor, 1);
+      g.fillEllipse(cx, size * 0.28, 20, 12);
+    }
+
+    g.fillStyle(0x2a2a2e, 1);
+    g.fillCircle(cx - 3.5, size * 0.41, 1.6);
+    g.fillCircle(cx + 3.5, size * 0.41, 1.6);
+
+    g.generateTexture('character-preview', size, size);
+    g.destroy();
+  }
+
+  createCharacterHtmlInput() {
+    this.destroyCharacterHtmlInput();
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.maxLength = 20;
+    input.placeholder = 'Player';
+    input.value = this.character.name;
+    input.style.position = 'absolute';
+    input.style.fontSize = '14px';
+    input.style.padding = '5px 8px';
+    input.style.width = '160px';
+    input.style.border = '1px solid #555';
+    input.style.borderRadius = '4px';
+    input.style.backgroundColor = '#242424';
+    input.style.color = '#ffffff';
+    input.style.outline = 'none';
+    input.style.zIndex = '10';
+
+    input.addEventListener('keydown', (e) => e.stopPropagation());
+    input.addEventListener('input', () => this.refreshCharacterUI());
+
+    document.body.appendChild(input);
+    this.characterHtmlInput = input;
+    this.positionCharacterHtmlInput();
+    input.focus();
+  }
+
+  positionCharacterHtmlInput() {
+    if (!this.characterHtmlInput) return;
+    const canvas = this.game.canvas;
+    const rect = canvas.getBoundingClientRect();
+    const { width, height } = this.scale;
+    const cx = width / 2;
+    const cy = height / 2;
+    const panelRight = cx + 60;
+
+    const scaleX = rect.width / width;
+    const scaleY = rect.height / height;
+
+    this.characterHtmlInput.style.left = `${rect.left + (panelRight - 10) * scaleX}px`;
+    this.characterHtmlInput.style.top = `${rect.top + (cy - 130 + 14) * scaleY}px`;
+  }
+
+  destroyCharacterHtmlInput() {
+    if (this.characterHtmlInput) {
+      this.characterHtmlInput.remove();
+      this.characterHtmlInput = null;
+    }
+  }
+
+  saveAndExitCharacterScreen() {
+    if (this.characterHtmlInput) {
+      this.character.name = this.characterHtmlInput.value.trim() || 'Player';
+    }
+    saveCharacter(this.character);
+    this.destroyCharacterHtmlInput();
+    this.showStart();
   }
 
   showWorldList() {

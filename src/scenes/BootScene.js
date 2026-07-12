@@ -153,12 +153,36 @@ export default class BootScene extends Phaser.Scene {
     const cx = size / 2;
     const shirtColor = this.characterColor || 0x3f5fd6;
     const hairStyle = this.characterHair || 'short';
+    const gender = this.characterGender || 'male';
 
     g.fillStyle(0x000000, 0.3);
     g.fillEllipse(cx, size - 4, size * 0.5, size * 0.16);
 
+    // Legs, drawn under the torso so the hem/shirt overlaps the tops.
+    g.fillStyle(0xe8b98a, 1);
+    g.fillRoundedRect(cx - 7, size * 0.62, 5, size * 0.3, 2);
+    g.fillRoundedRect(cx + 2, size * 0.62, 5, size * 0.3, 2);
+    g.fillStyle(0x5a3a20, 1);
+    g.fillRoundedRect(cx - 7, size - 6, 5, 4, 1.5);
+    g.fillRoundedRect(cx + 2, size - 6, 5, 4, 1.5);
+
     g.fillStyle(shirtColor, 1);
-    g.fillRoundedRect(cx - 9, size * 0.42, 18, 16, 4);
+    if (gender === 'female') {
+      // Tapered waist with a slight skirt-like flare at the hem.
+      const top = size * 0.42, bodyH = 16, shoulderW = 15, waistW = 11, hemW = 17;
+      g.beginPath();
+      g.moveTo(cx - shoulderW / 2, top);
+      g.lineTo(cx + shoulderW / 2, top);
+      g.lineTo(cx + waistW / 2, top + bodyH * 0.55);
+      g.lineTo(cx + hemW / 2, top + bodyH);
+      g.lineTo(cx - hemW / 2, top + bodyH);
+      g.lineTo(cx - waistW / 2, top + bodyH * 0.55);
+      g.closePath();
+      g.fillPath();
+    } else {
+      // Boxier, broader-shouldered build.
+      g.fillRoundedRect(cx - 10, size * 0.42, 20, 16, 3);
+    }
 
     g.fillStyle(0xe8b98a, 1);
     g.fillCircle(cx, size * 0.36, 10);
@@ -166,8 +190,8 @@ export default class BootScene extends Phaser.Scene {
     this.drawHair(g, hairStyle, cx, size);
 
     g.fillStyle(0x2a2a2e, 1);
-    g.fillCircle(cx - 3.5, size * 0.36, 1.6);
-    g.fillCircle(cx + 3.5, size * 0.36, 1.6);
+    g.fillCircle(cx - 3.5, size * 0.41, 1.6);
+    g.fillCircle(cx + 3.5, size * 0.41, 1.6);
 
     g.generateTexture('player', size, size);
     g.destroy();
