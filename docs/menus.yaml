@@ -1,0 +1,20 @@
+root:
+  start:
+    singleplayer:
+      new:
+        name:
+          launch: {}
+      load: {}
+    multiplayer:
+      join:
+        enter_code:
+          launch_as_guest: {}
+      create:
+        new:
+          name:
+            launch_as_host: "show join code in HUD"
+        load:
+          select_save_game:
+            launch_as_host: "show join code in HUD"
+  mods: {}
+  character_creation: {}

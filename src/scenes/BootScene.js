@@ -1,5 +1,8 @@
 import Phaser from 'phaser';
 import { loadWorld, writeWorld, listWorlds, loadCharacter } from '../SaveManager.js';
+import { drawHairShape, ageToScale } from '../HairStyles.js';
+import { preloadSounds, playChopSound, playFootstepSound, playArrowShootSound, playArrowHitSound } from '../SoundManager.js';
+import RemotePlayer from '../entities/RemotePlayer.js';
 
 const WORLD_WIDTH = 2400;
 const WORLD_HEIGHT = 1800;
@@ -17,21 +20,42 @@ export default class BootScene extends Phaser.Scene {
     if (this.startMode === 'load' && this.worldId) {
       const entry = listWorlds().find(w => w.id === this.worldId);
       this.peaceful = !!(entry && entry.peaceful);
+      this.multiplayer = !!(entry && entry.multiplayer);
+      this.cloneMod = !!(entry && entry.cloneMod);
+      this.gunMod = !!(entry && entry.gunMod);
     } else {
       this.peaceful = !!(data && data.peaceful);
+      this.multiplayer = !!(data && data.multiplayer);
+      this.cloneMod = !!(data && data.cloneMod);
+      this.gunMod = !!(data && data.gunMod);
     }
+
+    // Multiplayer wiring: `network` is a connected NetworkManager passed from MenuScene
+    // (host created a room, or guest joined one via room code). Host runs the real
+    // simulation and broadcasts snapshots; guests additionally run their own local
+    // world for now and just render other players as remote ghosts (see RemotePlayer).
+    this.network = data && data.network;
+    this.isMultiplayerHost = !!(data && data.isHost);
+    this.roomCode = data && data.roomCode;
+    this.remotePlayers = new Map();
 
     const character = loadCharacter();
     this.characterName = character.name;
     this.characterColor = character.color;
     this.characterGender = character.gender;
     this.characterHair = character.hair;
+    this.characterAge = character.age;
+    this.characterSkinTone = character.skinTone;
+    this.characterHairColor = character.hairColor;
   }
 
-  preload() {}
+  preload() {
+    preloadSounds(this);
+  }
 
   create() {
     this.cameras.main.setBackgroundColor('#2f5d3a');
+    this.setupWorldRng();
 
     this.generateGroundTexture();
     this.generateTreeTextures();
@@ -73,6 +97,243 @@ export default class BootScene extends Phaser.Scene {
     }
 
     this.setupAutosave();
+    this.setupMultiplayer();
+    this.setupCloneMod();
+
+    if (this.gunMod && this.startMode === 'new') {
+      this.grantStartingGuns();
+    }
+  }
+
+  // Gun Mod: called once, only for a brand-new world (not on load, so a player who
+  // drops/loses a gun doesn't have it silently re-granted every time they reload).
+  grantStartingGuns() {
+    ['ak47', 'famas', 'glock17'].forEach(kind => {
+      this.inventory[kind] = 1;
+      this.assignToHotbar(kind);
+    });
+    this.renderHotbar();
+  }
+
+  // Clone Mod: press C to spawn (or despawn) a purely visual companion that mirrors
+  // the player's own appearance and follows a short distance behind. No AI decisions,
+  // no combat — just a mirror that tags along.
+  setupCloneMod() {
+    if (!this.cloneMod) return;
+
+    this.clone = null;
+    this.keyC = this.input.keyboard.addKey('C');
+
+    this.cloneModBtn = this.add.text(0, 0, 'Clone (C)', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#ffffff',
+      backgroundColor: 'rgba(58,58,107,0.85)', padding: { x: 8, y: 5 }
+    }).setScrollFactor(0).setDepth(2500000)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.toggleClone());
+
+    const position = () => this.cloneModBtn.setPosition(12, this.roomCode ? 46 : 12);
+    position();
+    this.scale.on('resize', position);
+  }
+
+  toggleClone() {
+    if (this.clone) {
+      this.despawnClone();
+    } else {
+      this.spawnClone();
+    }
+    if (this.cloneModBtn) {
+      this.cloneModBtn.setText(this.clone ? 'Despawn Clone (C)' : 'Clone (C)');
+    }
+  }
+
+  spawnClone() {
+    if (this.clone) return;
+
+    const offsetX = Phaser.Math.Between(-40, -24) * (Phaser.Math.Between(0, 1) ? 1 : -1);
+    const sprite = this.add.sprite(this.player.x + offsetX, this.player.y, this.player.texture.key);
+    sprite.setDepth(this.player.y);
+
+    const nameText = this.add.text(sprite.x, sprite.y - 26, 'Clone', {
+      fontFamily: 'Arial', fontSize: '11px', color: '#ffe066',
+      backgroundColor: '#000000aa', padding: { x: 3, y: 1 }
+    }).setOrigin(0.5, 1);
+
+    this.clone = { sprite, nameText };
+  }
+
+  despawnClone() {
+    if (!this.clone) return;
+    this.clone.sprite.destroy();
+    this.clone.nameText.destroy();
+    this.clone = null;
+  }
+
+  updateClone() {
+    if (!this.clone) return;
+    const { sprite, nameText } = this.clone;
+
+    const followDistance = 34;
+    const d = Phaser.Math.Distance.Between(sprite.x, sprite.y, this.player.x, this.player.y);
+    if (d > followDistance) {
+      const angle = Phaser.Math.Angle.Between(sprite.x, sprite.y, this.player.x, this.player.y);
+      const speed = Phaser.Math.Clamp((d - followDistance) * 4, 0, 200);
+      sprite.x += Math.cos(angle) * speed * (this.game.loop.delta / 1000);
+      sprite.y += Math.sin(angle) * speed * (this.game.loop.delta / 1000);
+    }
+
+    sprite.setTexture(this.player.texture.key);
+    sprite.setDepth(sprite.y);
+    nameText.setPosition(sprite.x, sprite.y - 26);
+  }
+
+  // A seeded RNG used only for one-time WORLD LAYOUT (tree/rock/pool/base positions),
+  // so a multiplayer host and its guests independently generate the identical static
+  // world without transmitting any positions over the wire. Seeded from the room code
+  // when in multiplayer (host and guest always know the same code); otherwise random,
+  // since single-player has no one else to stay in sync with.
+  //
+  // Only the four layout methods (scatterItems, scatterRocks, scatterPools,
+  // scatterTrees, and the base-position loop in spawnSkeletons) should read from
+  // this.worldRng. Everything else (damage-shake jitter, decoration, mob wander/combat
+  // AI, item-drop scatter) intentionally keeps using the unseeded Phaser.Math global,
+  // since none of that needs to match between clients.
+  setupWorldRng() {
+    const seed = this.network && this.roomCode ? this.roomCode : `${Date.now()}-${Math.random()}`;
+    this.worldRng = new Phaser.Math.RandomDataGenerator([seed]);
+  }
+
+  rngBetween(min, max) {
+    return this.worldRng.between(min, max);
+  }
+
+  rngFloatBetween(min, max) {
+    return this.worldRng.realInRange(min, max);
+  }
+
+  rngPick(array) {
+    return this.worldRng.pick(array);
+  }
+
+  setupMultiplayer() {
+    if (!this.network) return;
+
+    this.showRoomCodeHud();
+
+    this.network.on('player-joined', (msg) => this.addRemotePlayer(msg));
+    this.network.on('player-left', (msg) => this.removeRemotePlayer(msg.id));
+    this.network.on('host-left', () => this.handleHostLeft());
+    this.network.on('disconnected', () => this.handleNetworkDisconnected());
+
+    // Any players already in the room when we connected (host sees guests who
+    // joined before it started the world; a guest sees players already present).
+    this.network.players.forEach((p) => {
+      if (p.id !== this.network.id) this.addRemotePlayer(p);
+    });
+
+    if (this.isMultiplayerHost) {
+      this.network.on('input', (msg) => this.handleRemoteInput(msg));
+      this.network.send('start-game', {});
+      this.nextSnapshotTime = 0;
+    } else {
+      this.network.on('world-snapshot', (msg) => this.applyWorldSnapshot(msg));
+      this.network.on('world-event', (msg) => this.applyWorldEvent(msg));
+    }
+
+    this.events.on('shutdown', () => {
+      if (this.network) this.network.disconnect();
+    });
+  }
+
+  showRoomCodeHud() {
+    if (!this.roomCode) return;
+
+    this.roomCodeText = this.add.text(0, 0, `Room: ${this.roomCode}`, {
+      fontFamily: 'Arial', fontSize: '14px', color: '#ffffff',
+      backgroundColor: 'rgba(26,26,26,0.85)', padding: { x: 8, y: 5 }
+    }).setScrollFactor(0).setDepth(2500000);
+
+    const position = () => this.roomCodeText.setPosition(12, 12);
+    position();
+    this.scale.on('resize', position);
+  }
+
+  addRemotePlayer(info) {
+    if (this.remotePlayers.has(info.id)) return;
+    const spawn = this.player ? { x: this.player.x, y: this.player.y } : { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
+    const remote = new RemotePlayer(this, spawn.x, spawn.y, info.color, info.name, !!info.isHost);
+    this.remotePlayers.set(info.id, remote);
+  }
+
+  removeRemotePlayer(id) {
+    const remote = this.remotePlayers.get(id);
+    if (!remote) return;
+    remote.destroy();
+    this.remotePlayers.delete(id);
+  }
+
+  handleHostLeft() {
+    if (this.isMultiplayerHost) return;
+    // The host disconnecting ends the session for guests — there is no world
+    // without the host's simulation. Return everyone to the menu.
+    this.exitToMenu();
+  }
+
+  handleNetworkDisconnected() {
+    // Connection dropped; nothing else to reconcile since guests don't hold
+    // authoritative state. Leave the scene running so the player isn't yanked
+    // out mid-action, but the room code HUD makes the disconnect state visible
+    // via the browser console for now.
+  }
+
+  // Host-only: receives raw input from a guest and is the hook point for applying
+  // it to that guest's representation. Movement/actions for guests are not yet
+  // simulated by the host (guests currently run their own local world) — this
+  // exists so the wiring is in place for the next pass.
+  handleRemoteInput(msg) {
+    // Intentionally minimal for now; see class-level note above.
+  }
+
+  // Host-only: broadcasts a lightweight snapshot of this client's own player
+  // position plus authoritative day/night state. Call from update().
+  broadcastWorldSnapshot() {
+    if (!this.network || !this.isMultiplayerHost || !this.player) return;
+    if (this.time.now < (this.nextSnapshotTime || 0)) return;
+    this.nextSnapshotTime = this.time.now + 100;
+
+    this.network.send('world-snapshot', {
+      players: [{ id: this.network.id, x: this.player.x, y: this.player.y, hp: this.playerHp }],
+      cycleStartTime: this.cycleStartTime
+    });
+  }
+
+  // Guest-only: applies a host snapshot by updating/creating RemotePlayer ghosts
+  // for every player in it (including the host), and syncing day/night state.
+  applyWorldSnapshot(msg) {
+    (msg.players || []).forEach((p) => {
+      if (p.id === this.network.id) return;
+      let remote = this.remotePlayers.get(p.id);
+      if (!remote) {
+        const known = this.network.players.find(pl => pl.id === p.id);
+        this.addRemotePlayer({ id: p.id, color: known?.color, name: known?.name, isHost: p.id === this.network.hostId });
+        remote = this.remotePlayers.get(p.id);
+      }
+      if (remote) remote.applyState(p);
+    });
+
+    if (typeof msg.cycleStartTime === 'number') {
+      this.cycleStartTime = msg.cycleStartTime;
+    }
+  }
+
+  // Guest-only: one-off world events relayed from the host. Placeholder for now —
+  // see class-level note about guests still running their own local world.
+  applyWorldEvent(msg) {
+    // Intentionally minimal for now; see class-level note above.
+  }
+
+  updateRemotePlayers() {
+    this.remotePlayers.forEach((remote) => remote.update());
   }
 
   setupAutosave() {
@@ -102,6 +363,11 @@ export default class BootScene extends Phaser.Scene {
       gameMode: this.gameMode,
       cycleElapsed: (this.time.now - this.cycleStartTime) % this.cycleLengthMs
     });
+  }
+
+  exitToMenu() {
+    this.saveGame();
+    this.scene.start('MenuScene');
   }
 
   applySaveData(data) {
@@ -148,23 +414,48 @@ export default class BootScene extends Phaser.Scene {
   }
 
   generatePlayerTexture() {
+    this.drawPlayerFrame('player', 0);
+    this.drawPlayerFrame('player-walk1', -4);
+    this.drawPlayerFrame('player-walk2', 4);
+  }
+
+  drawPlayerFrame(key, legOffset) {
     const size = 40;
     const g = this.add.graphics();
     const cx = size / 2;
     const shirtColor = this.characterColor || 0x3f5fd6;
     const hairStyle = this.characterHair || 'short';
     const gender = this.characterGender || 'male';
+    const skinTone = this.characterSkinTone || 0xe8b98a;
+    const hairColor = this.characterHairColor || 0x3a2a1e;
 
     g.fillStyle(0x000000, 0.3);
     g.fillEllipse(cx, size - 4, size * 0.5, size * 0.16);
 
     // Legs, drawn under the torso so the hem/shirt overlaps the tops.
-    g.fillStyle(0xe8b98a, 1);
-    g.fillRoundedRect(cx - 7, size * 0.62, 5, size * 0.3, 2);
-    g.fillRoundedRect(cx + 2, size * 0.62, 5, size * 0.3, 2);
+    // Each leg is a hinged quad: top stays fixed at the hip, bottom (foot) swings by
+    // legOffset, so the leg pivots like a real stride instead of sliding as a rigid block.
+    // Female legs are narrower and set closer together to fit the tapered hem.
+    const hipY = size * 0.62;
+    const footY = size - 2;
+    const legW = gender === 'female' ? 4 : 5;
+    const legInsetLeft = gender === 'female' ? cx - 6 : cx - 7;
+    const legInsetRight = cx + 2;
+    g.fillStyle(skinTone, 1);
+    [-1, 1].forEach(side => {
+      const hipLeft = side < 0 ? legInsetLeft : legInsetRight;
+      const footShift = side < 0 ? legOffset : -legOffset;
+      g.beginPath();
+      g.moveTo(hipLeft, hipY);
+      g.lineTo(hipLeft + legW, hipY);
+      g.lineTo(hipLeft + legW + footShift, footY);
+      g.lineTo(hipLeft + footShift, footY);
+      g.closePath();
+      g.fillPath();
+    });
     g.fillStyle(0x5a3a20, 1);
-    g.fillRoundedRect(cx - 7, size - 6, 5, 4, 1.5);
-    g.fillRoundedRect(cx + 2, size - 6, 5, 4, 1.5);
+    g.fillRoundedRect(legInsetLeft + legOffset, size - 6, legW, 4, 1.5);
+    g.fillRoundedRect(legInsetRight - legOffset, size - 6, legW, 4, 1.5);
 
     g.fillStyle(shirtColor, 1);
     if (gender === 'female') {
@@ -184,37 +475,21 @@ export default class BootScene extends Phaser.Scene {
       g.fillRoundedRect(cx - 10, size * 0.42, 20, 16, 3);
     }
 
-    g.fillStyle(0xe8b98a, 1);
+    g.fillStyle(skinTone, 1);
     g.fillCircle(cx, size * 0.36, 10);
 
-    this.drawHair(g, hairStyle, cx, size);
+    this.drawHair(g, hairStyle, cx, size, hairColor);
 
     g.fillStyle(0x2a2a2e, 1);
     g.fillCircle(cx - 3.5, size * 0.41, 1.6);
     g.fillCircle(cx + 3.5, size * 0.41, 1.6);
 
-    g.generateTexture('player', size, size);
+    g.generateTexture(key, size, size);
     g.destroy();
   }
 
-  drawHair(g, style, cx, size) {
-    const hairColor = 0x3a2a1e;
-
-    if (style === 'long') {
-      g.fillStyle(hairColor, 1);
-      g.fillEllipse(cx, size * 0.27, 21, 13);
-      g.fillEllipse(cx - 9, size * 0.42, 5, 10);
-      g.fillEllipse(cx + 9, size * 0.42, 5, 10);
-    } else if (style === 'ponytail') {
-      g.fillStyle(hairColor, 1);
-      g.fillEllipse(cx, size * 0.28, 20, 12);
-      g.fillEllipse(cx + 10, size * 0.36, 4, 9);
-    } else if (style === 'bald') {
-      // No hair drawn; scalp shows through.
-    } else {
-      g.fillStyle(hairColor, 1);
-      g.fillEllipse(cx, size * 0.28, 20, 12);
-    }
+  drawHair(g, style, cx, size, hairColor) {
+    drawHairShape(g, style, cx, size, hairColor);
   }
 
   generateItemTextures() {
@@ -374,6 +649,81 @@ export default class BootScene extends Phaser.Scene {
       g.lineTo(cx + size * 0.09, size * 0.86);
       g.strokePath();
       g.generateTexture('icon-bow', size, size);
+      g.destroy();
+    }
+
+    // AK-47 icon: distinctive curved magazine + wood furniture, side profile.
+    {
+      const w = 32, h = 20;
+      const g = this.add.graphics();
+      const cy = h * 0.5;
+      // Barrel + receiver.
+      g.fillStyle(0x2a2a2a, 1);
+      g.fillRect(w * 0.08, cy - 2, w * 0.8, 3.5);
+      // Wood stock (rear).
+      g.fillStyle(0x8a5a34, 1);
+      g.fillRect(w * 0.02, cy - 1, w * 0.16, 6);
+      // Wood handguard (front, under barrel).
+      g.fillStyle(0x8a5a34, 1);
+      g.fillRect(w * 0.58, cy + 1.5, w * 0.22, 3);
+      // Pistol grip.
+      g.fillStyle(0x3a2a1e, 1);
+      g.fillTriangle(w * 0.34, cy + 1.5, w * 0.34, cy + 8, w * 0.42, cy + 1.5);
+      // Curved banana magazine.
+      g.fillStyle(0x4a4a4a, 1);
+      g.beginPath();
+      g.moveTo(w * 0.42, cy + 2);
+      g.lineTo(w * 0.5, cy + 2);
+      g.lineTo(w * 0.46, cy + 11);
+      g.lineTo(w * 0.4, cy + 10);
+      g.closePath();
+      g.fillPath();
+      // Front sight post.
+      g.fillStyle(0x1a1a1a, 1);
+      g.fillRect(w * 0.86, cy - 6, 1.6, 4.5);
+      g.generateTexture('icon-ak47', w, h);
+      g.destroy();
+    }
+
+    // FAMAS icon: bullpup silhouette, boxy carry handle, mag behind the grip.
+    {
+      const w = 32, h = 20;
+      const g = this.add.graphics();
+      const cy = h * 0.5;
+      // Main body, chunky bullpup shape.
+      g.fillStyle(0x3a3f3a, 1);
+      g.fillRoundedRect(w * 0.08, cy - 2.5, w * 0.6, 6, 2);
+      // Carry handle on top.
+      g.fillStyle(0x2a2f2a, 1);
+      g.fillRect(w * 0.28, cy - 7, w * 0.22, 4.5);
+      // Barrel.
+      g.fillStyle(0x1a1a1a, 1);
+      g.fillRect(w * 0.62, cy - 1, w * 0.3, 2.5);
+      // Grip.
+      g.fillStyle(0x2a2f2a, 1);
+      g.fillTriangle(w * 0.42, cy + 3, w * 0.42, cy + 9, w * 0.5, cy + 3);
+      // Straight magazine, behind the grip (bullpup layout).
+      g.fillStyle(0x4a4a4a, 1);
+      g.fillRect(w * 0.2, cy + 3, 3.5, 9);
+      g.generateTexture('icon-famas', w, h);
+      g.destroy();
+    }
+
+    // Glock-17 icon: compact pistol silhouette.
+    {
+      const w = 22, h = 18;
+      const g = this.add.graphics();
+      const cy = h * 0.42;
+      // Slide + barrel.
+      g.fillStyle(0x2a2a2a, 1);
+      g.fillRoundedRect(w * 0.1, cy - 2.5, w * 0.75, 5, 1.5);
+      // Frame/grip, angled down-back.
+      g.fillStyle(0x1a1a1a, 1);
+      g.fillTriangle(w * 0.2, cy + 2, w * 0.16, h * 0.95, w * 0.5, cy + 2);
+      // Trigger guard.
+      g.lineStyle(1.4, 0x1a1a1a, 1);
+      g.strokeCircle(w * 0.42, cy + 3, 2.6);
+      g.generateTexture('icon-glock17', w, h);
       g.destroy();
     }
 
@@ -952,15 +1302,15 @@ export default class BootScene extends Phaser.Scene {
     const tryPlace = (keys, kind) => {
       let x, y, attempts = 0;
       do {
-        x = Phaser.Math.Between(20, WORLD_WIDTH - 20);
-        y = Phaser.Math.Between(20, WORLD_HEIGHT - 20);
+        x = this.rngBetween(20, WORLD_WIDTH - 20);
+        y = this.rngBetween(20, WORLD_HEIGHT - 20);
         attempts++;
       } while (attempts < 8 && this.rockPositions.some(r => Phaser.Math.Distance.Between(x, y, r.x, r.y) < r.clearRadius * 0.5));
 
-      const key = Phaser.Utils.Array.GetRandom(keys);
+      const key = this.rngPick(keys);
       const item = this.items.create(x, y, key);
       item.itemKind = kind;
-      item.setRotation(Phaser.Math.FloatBetween(0, Math.PI * 2));
+      item.setRotation(this.rngFloatBetween(0, Math.PI * 2));
       item.setDepth(y - 500);
       item.body.setSize(item.width * 0.8, item.height * 0.8);
       item.body.setAllowGravity(false);
@@ -993,6 +1343,9 @@ export default class BootScene extends Phaser.Scene {
       pickaxe: { label: 'Stone Pickaxe', icon: 'icon-pickaxe', equippable: true, handIcon: 'icon-pickaxe' },
       sword: { label: 'Stone Sword', icon: 'icon-sword', equippable: true, handIcon: 'icon-sword' },
       bow: { label: 'Bow', icon: 'icon-bow', equippable: true, handIcon: 'icon-bow' },
+      ak47: { label: 'AK-47', icon: 'icon-ak47', equippable: true, handIcon: 'icon-ak47' },
+      famas: { label: 'FAMAS', icon: 'icon-famas', equippable: true, handIcon: 'icon-famas' },
+      glock17: { label: 'Glock-17', icon: 'icon-glock17', equippable: true, handIcon: 'icon-glock17' },
       log_seat: { label: 'Log Seat', icon: 'icon-log-seat' },
       furnace: { label: 'Furnace Kit', icon: 'icon-furnace' },
       iron_ore: { label: 'Iron Ore', icon: 'icon-iron-ore' },
@@ -1127,7 +1480,7 @@ export default class BootScene extends Phaser.Scene {
         .setStrokeStyle(2, 0x555555)
         .setScrollFactor(0)
         .setInteractive({ useHandCursor: true })
-        .on('pointerdown', () => this.activateHotbarSlot(i));
+        .on('pointerdown', () => this.handleHotbarSlotClick(i));
 
       const icon = this.add.image(0, 0, 'twig-md').setScale(1.2).setVisible(false).setScrollFactor(0);
       const countLabel = this.add.text(0, 0, '', {
@@ -1174,6 +1527,29 @@ export default class BootScene extends Phaser.Scene {
   clearHotbarSlot(index) {
     this.hotbar[index] = null;
     this.renderHotbar();
+  }
+
+  handleHotbarSlotClick(index) {
+    const now = this.time.now;
+    const isDoubleClick = this.lastHotbarClick
+      && this.lastHotbarClick.index === index
+      && now - this.lastHotbarClick.time < 350;
+
+    this.lastHotbarClick = { index, time: now };
+
+    if (isDoubleClick) {
+      this.lastHotbarClick = null;
+      if (this.hotbar[index]) {
+        if (this.equippedItem === this.hotbar[index]) {
+          this.equippedItem = null;
+          this.equippedSprite.setVisible(false);
+        }
+        this.clearHotbarSlot(index);
+      }
+      return;
+    }
+
+    this.activateHotbarSlot(index);
   }
 
   renderHotbar() {
@@ -1719,7 +2095,13 @@ export default class BootScene extends Phaser.Scene {
   }
 
   updateDayNightCycle() {
-    if (this.seatedOn && this.isNight === this.skipStartedNight) {
+    // Guests never drive their own cycleStartTime — the host is authoritative for
+    // day/night (including the campfire time-skip) and broadcasts cycleStartTime in
+    // its world-snapshot; applyWorldSnapshot() applies it directly to this.cycleStartTime.
+    // Guests just render from whatever value that leaves them with each frame.
+    const isGuest = this.network && !this.isMultiplayerHost;
+
+    if (!isGuest && this.seatedOn && this.isNight === this.skipStartedNight) {
       const skipSpeed = 40;
       this.cycleStartTime -= this.game.loop.delta * (skipSpeed - 1);
     }
@@ -2185,7 +2567,9 @@ export default class BootScene extends Phaser.Scene {
     if (this.hitInProgress) return;
     if (!this.equippedItem) return;
 
-    if (this.equippedItem !== 'bow') {
+    const isGun = !!this.gunDefs[this.equippedItem];
+
+    if (this.equippedItem !== 'bow' && !isGun) {
       this.swingEquippedTool();
     }
 
@@ -2204,6 +2588,8 @@ export default class BootScene extends Phaser.Scene {
       this.attackNearestSkeleton();
     } else if (this.equippedItem === 'bow') {
       this.firePlayerArrow();
+    } else if (isGun) {
+      this.fireGun();
     }
   }
 
@@ -2226,6 +2612,7 @@ export default class BootScene extends Phaser.Scene {
     const maxHits = 5;
     target.hits++;
     this.hitInProgress = true;
+    playChopSound(this);
 
     const sprite = target.sprite;
     const origX = target.x;
@@ -2536,6 +2923,90 @@ export default class BootScene extends Phaser.Scene {
     g.destroy();
   }
 
+  // Skeleton horse rider: a wide horizontal texture (horse skeleton body + legs)
+  // with a small skeleton rider silhouette on top, facing right by default.
+  generateSkeletonRiderTexture() {
+    this.drawSkeletonRiderFrame('skeleton-rider', 0);
+    this.drawSkeletonRiderFrame('skeleton-rider-walk1', -3);
+    this.drawSkeletonRiderFrame('skeleton-rider-walk2', 3);
+  }
+
+  // legOffset swings the front and back leg pairs in opposite directions for a
+  // simple gallop cycle, matching the player's hinged-leg walk animation pattern.
+  drawSkeletonRiderFrame(key, legOffset) {
+    const w = 56;
+    const h = 40;
+    const g = this.add.graphics();
+    const cx = w / 2;
+    const groundY = h * 0.88;
+
+    g.fillStyle(0x000000, 0.3);
+    g.fillEllipse(cx, h - 3, w * 0.42, h * 0.1);
+
+    // Horse legs (bone-white, thin double-stroke like the biped skeletons).
+    // Front legs (right pair) and back legs (left pair) swing in opposite phase.
+    g.lineStyle(3, 0xe0dccf, 1);
+    const legDefs = [
+      { x: w * 0.22, phase: -1 },
+      { x: w * 0.34, phase: -1 },
+      { x: w * 0.62, phase: 1 },
+      { x: w * 0.74, phase: 1 }
+    ];
+    legDefs.forEach(({ x: lx, phase }) => {
+      const footShift = legOffset * phase;
+      g.beginPath();
+      g.moveTo(lx, h * 0.62);
+      g.lineTo(lx + footShift, groundY);
+      g.strokePath();
+    });
+
+    // Ribcage / barrel of the horse body.
+    g.fillStyle(0xe8e4d8, 1);
+    g.fillRoundedRect(w * 0.16, h * 0.42, w * 0.62, h * 0.24, 6);
+    g.lineStyle(1, 0xb0aa98, 0.8);
+    for (let i = 0; i < 4; i++) {
+      const lx = w * 0.22 + i * 8;
+      g.beginPath();
+      g.moveTo(lx, h * 0.44);
+      g.lineTo(lx, h * 0.64);
+      g.strokePath();
+    }
+
+    // Neck rising to the skull.
+    g.fillStyle(0xe8e4d8, 1);
+    g.fillRoundedRect(w * 0.68, h * 0.2, w * 0.12, h * 0.3, 4);
+
+    // Horse skull (elongated), with dark eye sockets and a jaw line.
+    g.fillStyle(0xf0ece0, 1);
+    g.fillRoundedRect(w * 0.74, h * 0.06, w * 0.22, h * 0.22, 4);
+    g.fillStyle(0x1a1a1a, 1);
+    g.fillCircle(w * 0.82, h * 0.14, 2);
+    g.lineStyle(1, 0x8a8478, 0.8);
+    g.beginPath();
+    g.moveTo(w * 0.74, h * 0.22);
+    g.lineTo(w * 0.94, h * 0.22);
+    g.strokePath();
+
+    // Tail, back-left.
+    g.lineStyle(2, 0xd8d2c4, 0.9);
+    g.beginPath();
+    g.moveTo(w * 0.16, h * 0.48);
+    g.lineTo(w * 0.04, h * 0.66);
+    g.strokePath();
+
+    // Skeleton rider torso + skull, seated on the horse's back.
+    g.fillStyle(0xe8e4d8, 1);
+    g.fillRoundedRect(cx - 6, h * 0.12, 12, 16, 3);
+    g.fillStyle(0xf0ece0, 1);
+    g.fillCircle(cx, h * 0.06, 7);
+    g.fillStyle(0x1a1a1a, 1);
+    g.fillCircle(cx - 2.4, h * 0.05, 1.5);
+    g.fillCircle(cx + 2.4, h * 0.05, 1.5);
+
+    g.generateTexture(key, w, h);
+    g.destroy();
+  }
+
   generateArrowTexture() {
     const size = 20;
     const g = this.add.graphics();
@@ -2606,6 +3077,7 @@ export default class BootScene extends Phaser.Scene {
     this.generateSkeletonTexture();
     this.generateSkeletonArcherTexture();
     this.generateSkeletonKnightTexture();
+    this.generateSkeletonRiderTexture();
     this.generateArrowTexture();
     this.generateBaseTextures();
 
@@ -2693,7 +3165,7 @@ export default class BootScene extends Phaser.Scene {
       .on('pointerdown', () => this.toggleSettingsPanel());
 
     const panelWidth = 220;
-    const panelHeight = 130;
+    const panelHeight = 190;
     this.settingsPanel = this.add.container(0, 0)
       .setScrollFactor(0)
       .setDepth(2500001)
@@ -2732,7 +3204,17 @@ export default class BootScene extends Phaser.Scene {
       fontFamily: 'Arial', fontSize: '9px', color: '#888888'
     }).setOrigin(0.5, 0).setScrollFactor(0);
 
-    this.settingsPanel.add([bg, title, closeBtn, modeLabel, this.survivalModeBtn, this.creativeModeBtn, hint]);
+    const exitBtn = this.add.text(panelWidth / 2, 128, 'Exit World', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#ffffff', backgroundColor: '#6b3a3a', padding: { x: 14, y: 7 }
+    }).setOrigin(0.5, 0).setScrollFactor(0)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.exitToMenu());
+
+    const exitHint = this.add.text(panelWidth / 2, 164, 'Saves before returning to the menu', {
+      fontFamily: 'Arial', fontSize: '9px', color: '#888888'
+    }).setOrigin(0.5, 0).setScrollFactor(0);
+
+    this.settingsPanel.add([bg, title, closeBtn, modeLabel, this.survivalModeBtn, this.creativeModeBtn, hint, exitBtn, exitHint]);
 
     this.positionSettingsMenu();
     this.scale.on('resize', () => this.positionSettingsMenu());
@@ -2786,6 +3268,7 @@ export default class BootScene extends Phaser.Scene {
     if (!arrow || arrow.hit) return;
     arrow.hit = true;
 
+    playArrowHitSound(this, 0);
     this.damagePlayer(this.arrowDamage);
     this.destroyArrow(arrow);
   }
@@ -2795,6 +3278,8 @@ export default class BootScene extends Phaser.Scene {
     if (arrow.source === skeleton) return;
 
     arrow.hit = true;
+    const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, skeleton.sprite.x, skeleton.sprite.y);
+    playArrowHitSound(this, dist);
     this.damageSkeleton(skeleton);
     this.destroyArrow(arrow);
 
@@ -2916,6 +3401,78 @@ export default class BootScene extends Phaser.Scene {
     this.physics.add.overlap(this.skeletonGroup, this.playerArrowGroup, (skeletonSprite, arrowSprite) => {
       this.handlePlayerArrowHit(skeletonSprite.enemyRef, arrowSprite.playerArrowRef);
     });
+
+    this.setupGuns();
+  }
+
+  // Gun Mod weapons: unlimited ammo, reuse the arrow-style hitscan-ish projectile
+  // pattern but with per-gun fire rate/damage/speed so each of the three guns feels
+  // distinct. Bullets are their own group so they don't touch arrow inventory/sound.
+  setupGuns() {
+    this.gunDefs = {
+      ak47: { damage: 2, fireDelay: 220, bulletSpeed: 620, color: 0xffcf4a },
+      famas: { damage: 1, fireDelay: 110, bulletSpeed: 600, color: 0x8fd6ff },
+      glock17: { damage: 1, fireDelay: 320, bulletSpeed: 560, color: 0xffffff }
+    };
+
+    this.bullets = [];
+    this.bulletGroup = this.physics.add.group();
+    this.lastGunFireTime = 0;
+
+    this.physics.add.overlap(this.skeletonGroup, this.bulletGroup, (skeletonSprite, bulletSprite) => {
+      this.handleBulletHit(skeletonSprite.enemyRef, bulletSprite.bulletRef);
+    });
+  }
+
+  fireGun() {
+    const def = this.gunDefs[this.equippedItem];
+    if (!def) return;
+    if (this.time.now - this.lastGunFireTime < def.fireDelay) return;
+    this.lastGunFireTime = this.time.now;
+
+    const pointer = this.input.activePointer;
+    const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+    const angle = Phaser.Math.Angle.Between(this.player.x, this.player.y, worldPoint.x, worldPoint.y);
+
+    const bulletSprite = this.add.circle(this.player.x, this.player.y - 10, 2.5, def.color, 1);
+    this.physics.add.existing(bulletSprite);
+    this.bulletGroup.add(bulletSprite);
+    bulletSprite.body.setAllowGravity(false);
+    bulletSprite.body.setCircle(2.5);
+    bulletSprite.body.setVelocity(Math.cos(angle) * def.bulletSpeed, Math.sin(angle) * def.bulletSpeed);
+
+    const bullet = { sprite: bulletSprite, hit: false, spawnTime: this.time.now, damage: def.damage };
+    bulletSprite.bulletRef = bullet;
+    this.bullets.push(bullet);
+  }
+
+  updateBullets() {
+    if (!this.bullets) return;
+    const maxLifetime = 900;
+    this.bullets.forEach(bullet => {
+      if (bullet.hit) return;
+      bullet.sprite.setDepth(bullet.sprite.y + 100000);
+      if (this.time.now - bullet.spawnTime > maxLifetime) {
+        this.destroyBullet(bullet);
+      }
+    });
+  }
+
+  destroyBullet(bullet) {
+    if (bullet.destroyed) return;
+    bullet.destroyed = true;
+    bullet.sprite.destroy();
+    this.bullets = this.bullets.filter(b => b !== bullet);
+  }
+
+  handleBulletHit(skeleton, bullet) {
+    if (!bullet || bullet.hit || !skeleton || skeleton.dead) return;
+
+    bullet.hit = true;
+    const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, skeleton.sprite.x, skeleton.sprite.y);
+    playArrowHitSound(this, dist);
+    this.damageSkeleton(skeleton, bullet.damage);
+    this.destroyBullet(bullet);
   }
 
   firePlayerArrow() {
@@ -2928,6 +3485,7 @@ export default class BootScene extends Phaser.Scene {
     this.inventory.arrow_item--;
     this.renderHotbar();
     if (this.inventoryPanel.visible) this.renderInventoryPage();
+    playArrowShootSound(this);
 
     const arrowSprite = this.physics.add.sprite(this.player.x, this.player.y - 10, 'arrow');
     this.playerArrowGroup.add(arrowSprite);
@@ -2963,6 +3521,8 @@ export default class BootScene extends Phaser.Scene {
     if (!arrow || arrow.hit || !skeleton || skeleton.dead) return;
 
     arrow.hit = true;
+    const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, skeleton.sprite.x, skeleton.sprite.y);
+    playArrowHitSound(this, dist);
     this.damageSkeleton(skeleton);
     this.destroyPlayerArrow(arrow);
   }
@@ -2970,9 +3530,10 @@ export default class BootScene extends Phaser.Scene {
   updateAimReticle() {
     const hasThrowable = this.hotbar.includes('pebble');
     const hasBow = this.equippedItem === 'bow';
+    const hasGun = !!this.gunDefs[this.equippedItem];
     const hasCampfire = this.hotbar.includes('campfire');
     const hasBucket = this.hotbar.includes('bucket_water') || this.hotbar.includes('bucket_lava');
-    if ((!hasThrowable && !hasBow && !hasCampfire && !hasBucket) || this.playerIsDead) {
+    if ((!hasThrowable && !hasBow && !hasGun && !hasCampfire && !hasBucket) || this.playerIsDead) {
       this.aimReticle.setVisible(false);
       this.aimReticleCross1.setVisible(false);
       this.aimReticleCross2.setVisible(false);
@@ -3049,8 +3610,8 @@ export default class BootScene extends Phaser.Scene {
     for (let b = 0; b < baseCount; b++) {
       let bx, by, attempts = 0;
       do {
-        bx = Phaser.Math.Between(160, WORLD_WIDTH - 160);
-        by = Phaser.Math.Between(160, WORLD_HEIGHT - 160);
+        bx = this.rngBetween(160, WORLD_WIDTH - 160);
+        by = this.rngBetween(160, WORLD_HEIGHT - 160);
         attempts++;
       } while (
         attempts < 30 && (
@@ -3066,6 +3627,23 @@ export default class BootScene extends Phaser.Scene {
       this.spawnSkeletonAt(bx, by, base, 'melee', 5, 80);
       this.spawnSkeletonAt(bx, by, base, 'archer', 3, 80);
       this.spawnSkeletonAt(bx, by, base, 'knight', 4, 80);
+    }
+
+    this.spawnSkeletonRiders(5, playerSpawnX, playerSpawnY, spawnSafeRadius + 200);
+  }
+
+  // Skeleton horse riders roam freely across the whole map rather than being tied
+  // to a base, so they're scattered independently of the base-spawning loop above.
+  spawnSkeletonRiders(count, playerSpawnX, playerSpawnY, safeRadius) {
+    for (let i = 0; i < count; i++) {
+      let x, y, attempts = 0;
+      do {
+        x = this.rngBetween(60, WORLD_WIDTH - 60);
+        y = this.rngBetween(60, WORLD_HEIGHT - 60);
+        attempts++;
+      } while (attempts < 30 && Phaser.Math.Distance.Between(x, y, playerSpawnX, playerSpawnY) < safeRadius);
+
+      this.spawnSkeletonAt(x, y, null, 'rider', 1, 0);
     }
   }
 
@@ -3102,9 +3680,10 @@ export default class BootScene extends Phaser.Scene {
   }
 
   spawnSkeletonAt(baseX, baseY, base, type, count, spreadRadius) {
-    const textureKey = type === 'archer' ? 'skeleton-archer' : type === 'knight' ? 'skeleton-knight' : 'skeleton';
-    const maxHp = type === 'knight' ? 10 : 5;
-    const touchDamage = type === 'knight' ? 2 : 1;
+    const textureKey = type === 'archer' ? 'skeleton-archer' : type === 'knight' ? 'skeleton-knight' : type === 'rider' ? 'skeleton-rider' : 'skeleton';
+    const maxHp = type === 'knight' ? 10 : type === 'rider' ? 6 : 5;
+    const touchDamage = type === 'knight' ? 2 : type === 'rider' ? 3 : 1;
+    const speedMultiplier = type === 'rider' ? 3 : 1;
 
     for (let i = 0; i < count; i++) {
       const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
@@ -3113,9 +3692,15 @@ export default class BootScene extends Phaser.Scene {
       const y = Phaser.Math.Clamp(baseY + Math.sin(angle) * dist, 40, WORLD_HEIGHT - 40);
 
       const sprite = this.physics.add.sprite(x, y, textureKey);
-      sprite.setOrigin(0.5, 0.85);
-      sprite.body.setSize(18, 14);
-      sprite.body.setOffset(9, 20);
+      if (type === 'rider') {
+        sprite.setOrigin(0.5, 0.85);
+        sprite.body.setSize(40, 18);
+        sprite.body.setOffset(8, 16);
+      } else {
+        sprite.setOrigin(0.5, 0.85);
+        sprite.body.setSize(18, 14);
+        sprite.body.setOffset(9, 20);
+      }
       this.skeletonGroup.add(sprite);
 
       const skeleton = {
@@ -3126,6 +3711,7 @@ export default class BootScene extends Phaser.Scene {
         dead: false,
         type,
         touchDamage,
+        speedMultiplier,
         homeBase: base,
         lastAttackTime: 0,
         lastShotTime: 0,
@@ -3149,6 +3735,7 @@ export default class BootScene extends Phaser.Scene {
   updateSkeletons() {
     const nightMult = this.nightSpeedMultiplier || 1;
     const chaseRange = this.isNight ? 300 : 220;
+    const riderChaseRange = this.isNight ? 420 : 340;
     const stopRange = 24;
     const speed = 70 * nightMult;
 
@@ -3160,17 +3747,19 @@ export default class BootScene extends Phaser.Scene {
     this.skeletons.forEach(skeleton => {
       if (skeleton.dead) return;
       const sprite = skeleton.sprite;
+      const skeletonSpeed = speed * (skeleton.speedMultiplier || 1);
 
       if (skeleton.hostileTarget) {
         if (skeleton.hostileTarget.dead) {
           skeleton.hostileTarget = null;
         } else {
-          this.updateHostileSkeleton(skeleton, speed, stopRange);
+          this.updateHostileSkeleton(skeleton, skeletonSpeed, stopRange);
           sprite.setDepth(sprite.y);
           skeleton.hpBarBg.setPosition(sprite.x, sprite.y - sprite.displayHeight - 6).setDepth(sprite.y + 1);
           skeleton.hpBarFill.setPosition(sprite.x - 13, sprite.y - sprite.displayHeight - 6).setDepth(sprite.y + 2);
           const hostileRatio = Phaser.Math.Clamp(skeleton.hp / skeleton.maxHp, 0, 1);
           skeleton.hpBarFill.width = 26 * hostileRatio;
+          this.updateRiderWalkFrame(skeleton);
           return;
         }
       }
@@ -3182,6 +3771,7 @@ export default class BootScene extends Phaser.Scene {
         sprite.setDepth(sprite.y);
         skeleton.hpBarBg.setPosition(sprite.x, sprite.y - sprite.displayHeight - 6).setDepth(sprite.y + 1);
         skeleton.hpBarFill.setPosition(sprite.x - 13, sprite.y - sprite.displayHeight - 6).setDepth(sprite.y + 2);
+        this.updateRiderWalkFrame(skeleton);
         return;
       }
 
@@ -3200,15 +3790,15 @@ export default class BootScene extends Phaser.Scene {
             this.fireArrow(skeleton);
           }
         } else {
-          this.wanderSkeleton(skeleton, speed);
+          this.wanderSkeleton(skeleton, skeletonSpeed);
         }
-      } else if (d < chaseRange && d > stopRange) {
+      } else if (d < (skeleton.type === 'rider' ? riderChaseRange : chaseRange) && d > stopRange) {
         const angle = Phaser.Math.Angle.Between(sprite.x, sprite.y, this.player.x, this.player.y);
-        sprite.body.setVelocity(Math.cos(angle) * speed, Math.sin(angle) * speed);
+        sprite.body.setVelocity(Math.cos(angle) * skeletonSpeed, Math.sin(angle) * skeletonSpeed);
       } else if (d <= stopRange) {
         sprite.body.setVelocity(0, 0);
       } else {
-        this.wanderSkeleton(skeleton, speed);
+        this.wanderSkeleton(skeleton, skeletonSpeed);
       }
 
       sprite.setDepth(sprite.y);
@@ -3216,9 +3806,28 @@ export default class BootScene extends Phaser.Scene {
       skeleton.hpBarFill.setPosition(sprite.x - 13, sprite.y - sprite.displayHeight - 6).setDepth(sprite.y + 2);
       const ratio = Phaser.Math.Clamp(skeleton.hp / skeleton.maxHp, 0, 1);
       skeleton.hpBarFill.width = 26 * ratio;
+      this.updateRiderWalkFrame(skeleton);
     });
 
     this.updateArrows();
+  }
+
+  // Swaps the skeleton-rider texture between idle and two gallop frames based on
+  // whether it's currently moving, mirroring the player's walk-cycle approach.
+  updateRiderWalkFrame(skeleton) {
+    if (skeleton.type !== 'rider') return;
+    const sprite = skeleton.sprite;
+    const isMoving = sprite.body.speed > 5;
+
+    if (!isMoving) {
+      if (sprite.texture.key !== 'skeleton-rider') sprite.setTexture('skeleton-rider');
+      return;
+    }
+
+    if (this.time.now < (skeleton.nextWalkFrameTime || 0)) return;
+    skeleton.nextWalkFrameTime = this.time.now + 110;
+    skeleton.walkFrameToggle = !skeleton.walkFrameToggle;
+    sprite.setTexture(skeleton.walkFrameToggle ? 'skeleton-rider-walk1' : 'skeleton-rider-walk2');
   }
 
   updateHostileSkeleton(skeleton, speed, stopRange) {
@@ -3250,6 +3859,12 @@ export default class BootScene extends Phaser.Scene {
           x: skeleton.homeBase.x + Math.cos(angle) * dist,
           y: skeleton.homeBase.y + Math.sin(angle) * dist
         };
+      } else if (skeleton.type === 'rider') {
+        // Riders have no home base — they roam freely across the whole map.
+        skeleton.wanderTarget = {
+          x: Phaser.Math.Between(60, WORLD_WIDTH - 60),
+          y: Phaser.Math.Between(60, WORLD_HEIGHT - 60)
+        };
       } else {
         skeleton.wanderTarget = {
           x: sprite.x + Phaser.Math.Between(-100, 100),
@@ -3270,6 +3885,7 @@ export default class BootScene extends Phaser.Scene {
   fireArrow(skeleton) {
     const sprite = skeleton.sprite;
     const angle = Phaser.Math.Angle.Between(sprite.x, sprite.y, this.player.x, this.player.y);
+    playArrowShootSound(this);
 
     const arrowSprite = this.physics.add.sprite(sprite.x, sprite.y - sprite.displayHeight * 0.4, 'arrow');
     this.arrowGroup.add(arrowSprite);
@@ -3317,8 +3933,8 @@ export default class BootScene extends Phaser.Scene {
     this.damageSkeleton(nearest);
   }
 
-  damageSkeleton(skeleton) {
-    skeleton.hits++;
+  damageSkeleton(skeleton, amount = 1) {
+    skeleton.hits += amount;
     skeleton.hp = Math.max(0, skeleton.maxHp - skeleton.hits);
 
     const sprite = skeleton.sprite;
@@ -3448,6 +4064,7 @@ export default class BootScene extends Phaser.Scene {
     player.setCollideWorldBounds(true);
     player.body.setSize(20, 16);
     player.body.setOffset(10, 22);
+    player.setScale(ageToScale(this.characterAge));
     this.player = player;
 
     (this.treeCollidersPending || []).forEach(zone => {
@@ -3796,13 +4413,13 @@ export default class BootScene extends Phaser.Scene {
     this.rockPositions = [];
     this.breakableRocks = [];
     for (let i = 0; i < count; i++) {
-      const key = Phaser.Utils.Array.GetRandom(this.rockKeys);
-      const x = Phaser.Math.Between(20, WORLD_WIDTH - 20);
-      const y = Phaser.Math.Between(20, WORLD_HEIGHT - 20);
+      const key = this.rngPick(this.rockKeys);
+      const x = this.rngBetween(20, WORLD_WIDTH - 20);
+      const y = this.rngBetween(20, WORLD_HEIGHT - 20);
       const rock = this.add.image(x, y, key);
-      const scale = Phaser.Math.FloatBetween(0.85, 1.25);
+      const scale = this.rngFloatBetween(0.85, 1.25);
       rock.setScale(scale);
-      rock.setRotation(Phaser.Math.FloatBetween(0, Math.PI * 2));
+      rock.setRotation(this.rngFloatBetween(0, Math.PI * 2));
       rock.setOrigin(0.5, 0.75);
       rock.setDepth(y - 1);
       this.rockPositions.push({ x, y, clearRadius: rock.displayWidth * 0.9 });
@@ -3828,8 +4445,8 @@ export default class BootScene extends Phaser.Scene {
     const placePool = (kind) => {
       let x, y, attempts = 0;
       do {
-        x = Phaser.Math.Between(150, WORLD_WIDTH - 150);
-        y = Phaser.Math.Between(150, WORLD_HEIGHT - 150);
+        x = this.rngBetween(150, WORLD_WIDTH - 150);
+        y = this.rngBetween(150, WORLD_HEIGHT - 150);
         attempts++;
       } while (
         attempts < 30 && (
@@ -3839,7 +4456,7 @@ export default class BootScene extends Phaser.Scene {
       );
 
       const texture = kind === 'lava' ? 'lava-pool' : 'water-pool';
-      const scale = Phaser.Math.FloatBetween(0.8, 1.3);
+      const scale = this.rngFloatBetween(0.8, 1.3);
       const sprite = this.add.image(x, y, texture).setScale(scale).setDepth(y - 1000000);
       const radius = sprite.displayWidth * 0.38;
 
@@ -3852,8 +4469,8 @@ export default class BootScene extends Phaser.Scene {
       this.pools.push(pool);
     };
 
-    const lavaCount = Phaser.Math.Between(2, 3);
-    const waterCount = Phaser.Math.Between(2, 3);
+    const lavaCount = this.rngBetween(2, 3);
+    const waterCount = this.rngBetween(2, 3);
     for (let i = 0; i < lavaCount; i++) placePool('lava');
     for (let i = 0; i < waterCount; i++) placePool('water');
   }
@@ -3868,8 +4485,8 @@ export default class BootScene extends Phaser.Scene {
     let placedCount = 0;
     while (placedCount < count && attempts < count * 12) {
       attempts++;
-      const x = Phaser.Math.Between(20, WORLD_WIDTH - 20);
-      const y = Phaser.Math.Between(20, WORLD_HEIGHT - 20);
+      const x = this.rngBetween(20, WORLD_WIDTH - 20);
+      const y = this.rngBetween(20, WORLD_HEIGHT - 20);
 
       let tooClose = false;
       for (let i = placed.length - 1; i >= 0; i--) {
@@ -3893,10 +4510,10 @@ export default class BootScene extends Phaser.Scene {
       placed.push({ x, y });
       placedCount++;
 
-      const key = Phaser.Utils.Array.GetRandom(this.treeKeys);
+      const key = this.rngPick(this.treeKeys);
       const tree = this.add.image(x, y, key);
       tree.setOrigin(0.5, 1);
-      const scale = Phaser.Math.FloatBetween(0.8, 1.3);
+      const scale = this.rngFloatBetween(0.8, 1.3);
       tree.setScale(scale);
       tree.setDepth(y);
 
@@ -3907,6 +4524,25 @@ export default class BootScene extends Phaser.Scene {
       this.treeCollidersPending.push(collider);
 
       this.choppableTrees.push({ x, y, sprite: tree, collider, hits: 0 });
+    }
+  }
+
+  updateFootsteps() {
+    if (this.time.now < (this.nextFootstepTime || 0)) return;
+    this.nextFootstepTime = this.time.now + 320;
+    playFootstepSound(this, 'grass');
+  }
+
+  updateWalkAnimation() {
+    if (this.time.now < (this.nextWalkFrameTime || 0)) return;
+    this.nextWalkFrameTime = this.time.now + 140;
+    this.walkFrameToggle = !this.walkFrameToggle;
+    this.setPlayerFrame(this.walkFrameToggle ? 'player-walk1' : 'player-walk2');
+  }
+
+  setPlayerFrame(key) {
+    if (this.player.texture.key !== key) {
+      this.player.setTexture(key);
     }
   }
 
@@ -3945,8 +4581,11 @@ export default class BootScene extends Phaser.Scene {
         if (vx !== 0 || vy !== 0) {
           const len = Math.hypot(vx, vy);
           this.player.body.setVelocity((vx / len) * speed, (vy / len) * speed);
+          this.updateFootsteps();
+          this.updateWalkAnimation();
         } else {
           this.player.body.setVelocity(0, 0);
+          this.setPlayerFrame('player');
         }
       }
 
@@ -3962,9 +4601,17 @@ export default class BootScene extends Phaser.Scene {
       this.updateAimReticle();
       this.updateThrownPebbles();
       this.updatePlayerArrows();
+      this.updateBullets();
+      this.updateRemotePlayers();
+      this.broadcastWorldSnapshot();
+      this.updateClone();
 
       if (Phaser.Input.Keyboard.JustDown(this.keyQ)) {
         this.toggleInventoryPanel();
+      }
+
+      if (this.cloneMod && Phaser.Input.Keyboard.JustDown(this.keyC)) {
+        this.toggleClone();
       }
 
       const numberKeys = [this.hotbarKeys.ONE, this.hotbarKeys.TWO, this.hotbarKeys.THREE, this.hotbarKeys.FOUR, this.hotbarKeys.FIVE];

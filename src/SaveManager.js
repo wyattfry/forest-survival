@@ -7,7 +7,10 @@ const DEFAULT_CHARACTER = {
   name: 'Player',
   color: 0x3f5fd6,
   gender: 'male',
-  hair: 'short'
+  hair: 'short',
+  age: 25,
+  skinTone: 0xe8b98a,
+  hairColor: 0x3a2a1e
 };
 
 function readIndex() {
@@ -37,7 +40,10 @@ export function createWorld(name, options) {
   const index = readIndex();
   index.push({
     id, name, createdAt: Date.now(), updatedAt: Date.now(),
-    peaceful: !!(options && options.peaceful)
+    peaceful: !!(options && options.peaceful),
+    multiplayer: !!(options && options.multiplayer),
+    cloneMod: !!(options && options.cloneMod),
+    gunMod: !!(options && options.gunMod)
   });
   writeIndex(index);
   return id;

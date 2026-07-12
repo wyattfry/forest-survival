@@ -1,13 +1,22 @@
 import Phaser from 'phaser';
 import { listWorlds, hasSave, createWorld, worldNameTaken, deleteWorld, isModInstalled, installMod, uninstallMod, loadCharacter, saveCharacter } from '../SaveManager.js';
+import { MALE_HAIR_STYLES, FEMALE_HAIR_STYLES, drawHairShape, ageToScale, HAIR_COLORS, SKIN_TONES } from '../HairStyles.js';
+import NetworkManager from '../net/NetworkManager.js';
 
 const PEACEFUL_MOD_ID = 'peaceful-mode';
-const CHARACTER_COLORS = [0x3f5fd6, 0xd63f3f, 0x3fd670, 0xd6b83f, 0x9a3fd6, 0x3fd6c9];
-const HAIR_STYLES = [
-  { id: 'short', label: 'Short' },
-  { id: 'long', label: 'Long' },
-  { id: 'ponytail', label: 'Ponytail' },
-  { id: 'bald', label: 'Bald' }
+const CLONE_MOD_ID = 'clone-mod';
+const GUN_MOD_ID = 'gun-mod';
+
+const MODS = [
+  { id: PEACEFUL_MOD_ID, name: 'Peaceful Mode', desc: 'No hostile enemies spawn' },
+  { id: CLONE_MOD_ID, name: 'Clone Mod', desc: 'Spawn a following clone of yourself' },
+  { id: GUN_MOD_ID, name: 'Gun Mod', desc: 'Start with an AK-47, FAMAS, and Glock-17' }
+];
+
+const CHARACTER_COLORS = [
+  0x3f5fd6, 0xd63f3f, 0x3fd670, 0xd6b83f, 0x9a3fd6, 0x3fd6c9,
+  0xe08a3f, 0xd63fa0, 0x4fd6ff, 0x8f8f8f, 0x2a2a2e, 0xffffff,
+  0x6b4a2a, 0x3fd63f, 0xff6b6b, 0x6b3ad6
 ];
 
 export default class MenuScene extends Phaser.Scene {
@@ -71,6 +80,16 @@ export default class MenuScene extends Phaser.Scene {
         .on('pointerdown', () => this.showWorldList());
     }
 
+    const joinBtnStyle = {
+      fontFamily: 'Arial', fontSize: '16px', color: '#cccccc',
+      backgroundColor: '#2c2c2c', padding: { x: 18, y: 8 }
+    };
+    this.joinGameBtn = this.add.text(0, 0, 'Join Multiplayer Game', joinBtnStyle)
+      .setOrigin(0.5)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.showJoinPrompt())
+      .setVisible(false);
+
     this.backBtn = this.add.text(0, 0, '< Back', {
       fontFamily: 'Arial', fontSize: '14px', color: '#aaaaaa', backgroundColor: '#242424', padding: { x: 10, y: 6 }
     }).setOrigin(0.5)
@@ -99,6 +118,8 @@ export default class MenuScene extends Phaser.Scene {
     this.events.on('shutdown', () => {
       this.destroyHtmlInput();
       this.destroyCharacterHtmlInput();
+      this.destroyJoinHtmlInputs();
+      this.stopPreviewWalkAnimation();
     });
   }
 
@@ -111,10 +132,11 @@ export default class MenuScene extends Phaser.Scene {
     this.startBtn.setPosition(cx, cy);
     this.modsBtn.setPosition(cx, cy + 56);
     this.characterBtn.setPosition(cx, cy + 96);
-    this.newGameBtn.setPosition(cx, cy - 30);
-    this.loadGameBtn.setPosition(cx, cy + 35);
-    this.backBtn.setPosition(cx, cy + 100);
-    this.noSaveHint.setPosition(cx, cy + 68);
+    this.newGameBtn.setPosition(cx, cy - 60);
+    this.loadGameBtn.setPosition(cx, cy);
+    this.joinGameBtn.setPosition(cx, cy + 56);
+    this.backBtn.setPosition(cx, cy + 130);
+    this.noSaveHint.setPosition(cx, cy + 32);
     this.worldListBackBtn.setPosition(cx, cy + 220);
 
     if (this.htmlInput) {
@@ -122,6 +144,12 @@ export default class MenuScene extends Phaser.Scene {
     }
     if (this.characterHtmlInput) {
       this.positionCharacterHtmlInput();
+    }
+    if (this.characterAgeHtmlInput) {
+      this.positionCharacterAgeHtmlInput();
+    }
+    if (this.joinCodeInput) {
+      this.positionJoinHtmlInputs();
     }
   }
 
@@ -133,6 +161,7 @@ export default class MenuScene extends Phaser.Scene {
     this.characterBtn.setVisible(false);
     this.newGameBtn.setVisible(true);
     this.loadGameBtn.setVisible(true);
+    this.joinGameBtn.setVisible(true);
     this.backBtn.setVisible(true);
     this.noSaveHint.setVisible(!hasSave());
     this.worldListContainer.setVisible(false);
@@ -145,11 +174,13 @@ export default class MenuScene extends Phaser.Scene {
     this.destroyHtmlInput();
     this.destroyCharacterHtmlInput();
     this.stage = 'start';
+    this.title.setVisible(true);
     this.startBtn.setVisible(true);
     this.modsBtn.setVisible(true);
     this.characterBtn.setVisible(true);
     this.newGameBtn.setVisible(false);
     this.loadGameBtn.setVisible(false);
+    this.joinGameBtn.setVisible(false);
     this.backBtn.setVisible(false);
     this.noSaveHint.setVisible(false);
     this.worldListContainer.setVisible(false);
@@ -161,94 +192,123 @@ export default class MenuScene extends Phaser.Scene {
   showModsScreen() {
     this.destroyHtmlInput();
     this.stage = 'mods';
+    this.title.setVisible(false);
     this.startBtn.setVisible(false);
     this.modsBtn.setVisible(false);
     this.characterBtn.setVisible(false);
+    this.characterContainer.setVisible(false);
+    this.worldListContainer.setVisible(false);
+    this.worldListBackBtn.setVisible(false);
 
     this.modsContainer.removeAll(true);
     const { width, height } = this.scale;
     const cx = width / 2;
     const cy = height / 2;
+    const rowHeight = 74;
+    const startY = cy - (MODS.length * rowHeight) / 2 - 50;
 
-    const heading = this.add.text(cx, cy - 100, 'Mods', {
+    const heading = this.add.text(cx, startY - 40, 'Mods', {
       fontFamily: 'Arial', fontSize: '28px', color: '#ffffff', fontStyle: 'bold'
     }).setOrigin(0.5);
 
-    const rowBg = this.add.rectangle(cx, cy - 40, 400, 60, 0x2c2c2c, 1)
-      .setStrokeStyle(1, 0x555555);
-    const modName = this.add.text(cx - 180, cy - 54, 'Peaceful Mode', {
-      fontFamily: 'Arial', fontSize: '15px', color: '#ffffff', fontStyle: 'bold'
+    this.modRowButtons = {};
+    const rowElements = [heading];
+
+    MODS.forEach((mod, i) => {
+      const rowY = startY + i * rowHeight;
+      const installed = isModInstalled(mod.id);
+
+      const rowBg = this.add.rectangle(cx, rowY, 460, 56, 0x2c2c2c, 1)
+        .setStrokeStyle(1, 0x555555);
+      const modName = this.add.text(cx - 220, rowY - 16, mod.name, {
+        fontFamily: 'Arial', fontSize: '15px', color: '#ffffff', fontStyle: 'bold'
+      });
+      const modDesc = this.add.text(cx - 220, rowY + 4, mod.desc, {
+        fontFamily: 'Arial', fontSize: '10px', color: '#999999', wordWrap: { width: 220 }
+      });
+
+      const downloadBtn = this.add.text(cx + 180, rowY, installed ? 'Installed' : 'Download', {
+        fontFamily: 'Arial', fontSize: '13px', color: '#ffffff',
+        backgroundColor: installed ? '#444444' : '#3a6b3a', padding: { x: 10, y: 6 }
+      }).setOrigin(1, 0.5);
+
+      const uninstallBtn = this.add.text(downloadBtn.x - downloadBtn.width - 8, rowY, 'Uninstall', {
+        fontFamily: 'Arial', fontSize: '13px', color: '#ffffff',
+        backgroundColor: installed ? '#6b3a3a' : '#333333', padding: { x: 10, y: 6 }
+      }).setOrigin(1, 0.5);
+
+      this.modRowButtons[mod.id] = { downloadBtn, uninstallBtn };
+      this.refreshModRowInteractivity(mod.id);
+
+      rowElements.push(rowBg, modName, modDesc, downloadBtn, uninstallBtn);
     });
-    const modDesc = this.add.text(cx - 180, cy - 34, 'No hostile enemies spawn in the world', {
-      fontFamily: 'Arial', fontSize: '11px', color: '#999999'
-    });
 
-    const installed = isModInstalled(PEACEFUL_MOD_ID);
-
-    this.modDownloadBtn = this.add.text(cx + 180, cy - 40, installed ? 'Installed' : 'Download', {
-      fontFamily: 'Arial', fontSize: '13px', color: '#ffffff',
-      backgroundColor: installed ? '#444444' : '#3a6b3a', padding: { x: 10, y: 6 }
-    }).setOrigin(1, 0.5);
-    if (!installed) {
-      this.modDownloadBtn.setInteractive({ useHandCursor: true })
-        .on('pointerdown', () => this.downloadMod());
-    }
-
-    this.modUninstallBtn = this.add.text(this.modDownloadBtn.x - this.modDownloadBtn.width - 8, cy - 40, 'Uninstall', {
-      fontFamily: 'Arial', fontSize: '13px', color: '#ffffff',
-      backgroundColor: installed ? '#6b3a3a' : '#333333', padding: { x: 10, y: 6 }
-    }).setOrigin(1, 0.5);
-    if (installed) {
-      this.modUninstallBtn.setInteractive({ useHandCursor: true })
-        .on('pointerdown', () => this.uninstallModClick());
-    }
-
-    const message = this.add.text(cx, cy + 10,
+    const message = this.add.text(cx, startY + MODS.length * rowHeight + 10,
       'Install a mod, then enable it when naming a new world.', {
         fontFamily: 'Arial', fontSize: '12px', color: '#888888', align: 'center'
       }).setOrigin(0.5);
 
-    const backBtn = this.add.text(cx, cy + 60, '< Back', {
+    const backBtn = this.add.text(cx, startY + MODS.length * rowHeight + 50, '< Back', {
       fontFamily: 'Arial', fontSize: '14px', color: '#aaaaaa', backgroundColor: '#242424', padding: { x: 10, y: 6 }
     }).setOrigin(0.5)
       .setInteractive({ useHandCursor: true })
       .on('pointerdown', () => this.showStart());
 
-    this.modsContainer.add([heading, rowBg, modName, modDesc, this.modUninstallBtn, this.modDownloadBtn, message, backBtn]);
+    rowElements.push(message, backBtn);
+    this.modsContainer.add(rowElements);
     this.modsContainer.setVisible(true);
   }
 
-  downloadMod() {
-    this.modDownloadBtn.disableInteractive();
-    this.modDownloadBtn.setText('Downloading...');
-    this.modDownloadBtn.setStyle({ backgroundColor: '#555555' });
+  refreshModRowInteractivity(modId) {
+    const { downloadBtn, uninstallBtn } = this.modRowButtons[modId];
+    const installed = isModInstalled(modId);
+
+    downloadBtn.removeAllListeners();
+    downloadBtn.disableInteractive();
+    downloadBtn.setText(installed ? 'Installed' : 'Download');
+    downloadBtn.setStyle({ backgroundColor: installed ? '#444444' : '#3a6b3a' });
+    if (!installed) {
+      downloadBtn.setInteractive({ useHandCursor: true })
+        .on('pointerdown', () => this.downloadMod(modId));
+    }
+
+    uninstallBtn.removeAllListeners();
+    uninstallBtn.disableInteractive();
+    uninstallBtn.setStyle({ backgroundColor: installed ? '#6b3a3a' : '#333333' });
+    if (installed) {
+      uninstallBtn.setInteractive({ useHandCursor: true })
+        .on('pointerdown', () => this.uninstallModClick(modId));
+    }
+  }
+
+  downloadMod(modId) {
+    const { downloadBtn } = this.modRowButtons[modId];
+    downloadBtn.disableInteractive();
+    downloadBtn.setText('Downloading...');
+    downloadBtn.setStyle({ backgroundColor: '#555555' });
 
     this.time.delayedCall(900, () => {
-      installMod(PEACEFUL_MOD_ID);
-      this.modDownloadBtn.setText('Installed');
-      this.modDownloadBtn.setStyle({ backgroundColor: '#444444' });
-      this.modUninstallBtn.setStyle({ backgroundColor: '#6b3a3a' });
-      this.modUninstallBtn.setInteractive({ useHandCursor: true })
-        .on('pointerdown', () => this.uninstallModClick());
+      installMod(modId);
+      this.refreshModRowInteractivity(modId);
     });
   }
 
-  uninstallModClick() {
-    uninstallMod(PEACEFUL_MOD_ID);
-    this.modUninstallBtn.disableInteractive();
-    this.modUninstallBtn.setStyle({ backgroundColor: '#333333' });
-    this.modDownloadBtn.setText('Download');
-    this.modDownloadBtn.setStyle({ backgroundColor: '#3a6b3a' });
-    this.modDownloadBtn.setInteractive({ useHandCursor: true })
-      .on('pointerdown', () => this.downloadMod());
+  uninstallModClick(modId) {
+    uninstallMod(modId);
+    this.refreshModRowInteractivity(modId);
   }
 
   showNamePrompt() {
     this.stage = 'name';
     this.newGameBtn.setVisible(false);
     this.loadGameBtn.setVisible(false);
+    this.joinGameBtn.setVisible(false);
     this.backBtn.setVisible(false);
     this.noSaveHint.setVisible(false);
+    this.modsContainer.setVisible(false);
+    this.characterContainer.setVisible(false);
+    this.worldListContainer.setVisible(false);
+    this.worldListBackBtn.setVisible(false);
 
     const { width, height } = this.scale;
     const cx = width / 2;
@@ -260,49 +320,87 @@ export default class MenuScene extends Phaser.Scene {
 
     this.createHtmlInput();
 
-    this.peacefulMode = false;
-    const modInstalled = isModInstalled(PEACEFUL_MOD_ID);
-    const checkboxLabel = modInstalled
-      ? '☐ Peaceful Mode (no hostile enemies)'
-      : '☐ Peaceful Mode (download this mod first)';
+    // One checkbox per installed-or-not mod; enabling one here sets it for this world only.
+    this.enabledMods = {};
+    this.modCheckboxes = {};
+    const modLabels = {
+      [PEACEFUL_MOD_ID]: 'Peaceful Mode (no hostile enemies)',
+      [CLONE_MOD_ID]: 'Clone Mod (spawn a following clone)',
+      [GUN_MOD_ID]: 'Gun Mod (start with 3 guns)'
+    };
 
-    this.peacefulCheckbox = this.add.text(cx - 90, cy + 46, checkboxLabel, {
-      fontFamily: 'Arial', fontSize: '13px', color: modInstalled ? '#cccccc' : '#666666'
-    }).setOrigin(0, 0.5);
+    this.nameCheckboxContainer = this.add.container(0, 0);
+    MODS.forEach((mod, i) => {
+      const y = cy + 46 + i * 22;
+      const modInstalled = isModInstalled(mod.id);
+      this.enabledMods[mod.id] = false;
+      const label = `☐ ${modLabels[mod.id]}${modInstalled ? '' : ' (download this mod first)'}`;
 
-    if (modInstalled) {
-      this.peacefulCheckbox.setInteractive({ useHandCursor: true })
-        .on('pointerdown', () => this.togglePeacefulMode());
-    }
+      const checkbox = this.add.text(cx - 90, y, label, {
+        fontFamily: 'Arial', fontSize: '13px', color: modInstalled ? '#cccccc' : '#666666'
+      }).setOrigin(0, 0.5);
 
-    this.nameError = this.add.text(cx, cy + 78, '', {
+      if (modInstalled) {
+        checkbox.setInteractive({ useHandCursor: true })
+          .on('pointerdown', () => this.toggleModEnabled(mod.id, modLabels[mod.id]));
+      }
+
+      this.modCheckboxes[mod.id] = checkbox;
+      this.nameCheckboxContainer.add(checkbox);
+    });
+
+    const checkboxBlockHeight = MODS.length * 22;
+
+    // Player mode toggle: Single Player and Multiplayer are mutually exclusive.
+    this.playerMode = 'single';
+    const modeOffStyle = { fontFamily: 'Arial', fontSize: '12px', color: '#aaaaaa', backgroundColor: '#242424', padding: { x: 10, y: 5 } };
+    const modeOnStyle = { fontFamily: 'Arial', fontSize: '12px', color: '#ffffff', backgroundColor: '#3a6b3a', padding: { x: 10, y: 5 } };
+    this.modeOffStyle = modeOffStyle;
+    this.modeOnStyle = modeOnStyle;
+
+    const modeY = cy + 46 + checkboxBlockHeight + 14;
+    this.singlePlayerBtn = this.add.text(cx - 90, modeY, 'Single Player', modeOnStyle).setOrigin(0, 0.5)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.setPlayerMode('single'));
+    this.multiplayerBtn = this.add.text(cx + 30, modeY, 'Multiplayer', modeOffStyle).setOrigin(0, 0.5)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.setPlayerMode('multi'));
+
+    this.nameError = this.add.text(cx, modeY + 32, '', {
       fontFamily: 'Arial', fontSize: '12px', color: '#e08080'
     }).setOrigin(0.5);
 
-    this.confirmBtn = this.add.text(cx, cy + 112, 'Create World', {
+    this.confirmBtn = this.add.text(cx, modeY + 66, 'Create World', {
       fontFamily: 'Arial', fontSize: '18px', color: '#ffffff', backgroundColor: '#3a6b3a', padding: { x: 20, y: 10 }
     }).setOrigin(0.5)
       .setInteractive({ useHandCursor: true })
       .on('pointerdown', () => this.confirmCreateWorld());
 
-    this.nameCancelBtn = this.add.text(cx, cy + 162, '< Cancel', {
+    this.nameCancelBtn = this.add.text(cx, modeY + 116, '< Cancel', {
       fontFamily: 'Arial', fontSize: '14px', color: '#aaaaaa', backgroundColor: '#242424', padding: { x: 10, y: 6 }
     }).setOrigin(0.5)
       .setInteractive({ useHandCursor: true })
       .on('pointerdown', () => this.cancelNamePrompt());
   }
 
-  togglePeacefulMode() {
-    this.peacefulMode = !this.peacefulMode;
-    this.peacefulCheckbox.setText(
-      (this.peacefulMode ? '☑' : '☐') + ' Peaceful Mode (no hostile enemies)'
-    );
+  toggleModEnabled(modId, label) {
+    this.enabledMods[modId] = !this.enabledMods[modId];
+    this.modCheckboxes[modId].setText((this.enabledMods[modId] ? '☑' : '☐') + ` ${label}`);
+  }
+
+  setPlayerMode(mode) {
+    this.playerMode = mode;
+    this.singlePlayerBtn.setStyle(mode === 'single' ? this.modeOnStyle : this.modeOffStyle);
+    this.multiplayerBtn.setStyle(mode === 'multi' ? this.modeOnStyle : this.modeOffStyle);
   }
 
   cancelNamePrompt() {
     this.destroyHtmlInput();
     this.nameLabel.destroy();
-    this.peacefulCheckbox.destroy();
+    this.nameCheckboxContainer.removeAll(true);
+    this.nameCheckboxContainer.destroy();
+    this.singlePlayerBtn.destroy();
+    this.multiplayerBtn.destroy();
     this.nameError.destroy();
     this.confirmBtn.destroy();
     this.nameCancelBtn.destroy();
@@ -373,17 +471,216 @@ export default class MenuScene extends Phaser.Scene {
       return;
     }
 
-    const id = createWorld(name, { peaceful: this.peacefulMode });
+    const isMultiplayer = this.playerMode === 'multi';
+    const peaceful = !!this.enabledMods[PEACEFUL_MOD_ID];
+    const cloneMod = !!this.enabledMods[CLONE_MOD_ID];
+    const gunMod = !!this.enabledMods[GUN_MOD_ID];
+    const id = createWorld(name, { peaceful, multiplayer: isMultiplayer, cloneMod, gunMod });
     this.destroyHtmlInput();
-    this.scene.start('BootScene', { mode: 'new', worldId: id, worldName: name, peaceful: this.peacefulMode });
+
+    const bootData = { mode: 'new', worldId: id, worldName: name, peaceful, multiplayer: isMultiplayer, cloneMod, gunMod };
+
+    if (!isMultiplayer) {
+      this.scene.start('BootScene', bootData);
+      return;
+    }
+
+    this.hostMultiplayerWorld(bootData);
+  }
+
+  // Connects to the relay server as host (creating a new room), then starts
+  // BootScene once the connection is confirmed. The room code is passed through
+  // so BootScene can show it in the HUD for other players to join.
+  hostMultiplayerWorld(bootData) {
+    this.confirmBtn.disableInteractive();
+    this.confirmBtn.setText('Connecting...');
+    this.nameError.setText('');
+
+    const character = loadCharacter();
+    const net = new NetworkManager();
+
+    net.on('waking-up', () => this.nameError.setText('Waking up server, this can take up to a minute...'));
+
+    net.connect(undefined, character.name, '')
+      .then(() => {
+        this.scene.start('BootScene', { ...bootData, network: net, isHost: true, roomCode: net.roomCode });
+      })
+      .catch((err) => {
+        this.confirmBtn.setInteractive({ useHandCursor: true });
+        this.confirmBtn.setText('Create World');
+        this.nameError.setText(err.message || 'Could not connect to multiplayer server');
+      });
+  }
+
+  showJoinPrompt() {
+    this.stage = 'join';
+    this.newGameBtn.setVisible(false);
+    this.loadGameBtn.setVisible(false);
+    this.joinGameBtn.setVisible(false);
+    this.backBtn.setVisible(false);
+    this.noSaveHint.setVisible(false);
+    this.modsContainer.setVisible(false);
+    this.characterContainer.setVisible(false);
+    this.worldListContainer.setVisible(false);
+    this.worldListBackBtn.setVisible(false);
+
+    const { width, height } = this.scale;
+    const cx = width / 2;
+    const cy = height / 2;
+
+    this.joinLabel = this.add.text(cx, cy - 60, 'Join Multiplayer Game', {
+      fontFamily: 'Arial', fontSize: '18px', color: '#ffffff'
+    }).setOrigin(0.5);
+
+    this.createJoinHtmlInputs();
+
+    this.joinError = this.add.text(cx, cy + 78, '', {
+      fontFamily: 'Arial', fontSize: '12px', color: '#e08080'
+    }).setOrigin(0.5);
+
+    this.joinConfirmBtn = this.add.text(cx, cy + 112, 'Join', {
+      fontFamily: 'Arial', fontSize: '18px', color: '#ffffff', backgroundColor: '#3a6b3a', padding: { x: 20, y: 10 }
+    }).setOrigin(0.5)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.confirmJoinGame());
+
+    this.joinCancelBtn = this.add.text(cx, cy + 162, '< Cancel', {
+      fontFamily: 'Arial', fontSize: '14px', color: '#aaaaaa', backgroundColor: '#242424', padding: { x: 10, y: 6 }
+    }).setOrigin(0.5)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.cancelJoinPrompt());
+  }
+
+  createJoinHtmlInputs() {
+    this.destroyJoinHtmlInputs();
+    const character = loadCharacter();
+
+    const codeInput = document.createElement('input');
+    codeInput.type = 'text';
+    codeInput.maxLength = 4;
+    codeInput.placeholder = 'ROOM CODE';
+    codeInput.style.position = 'absolute';
+    codeInput.style.fontSize = '18px';
+    codeInput.style.padding = '8px 12px';
+    codeInput.style.width = '160px';
+    codeInput.style.textAlign = 'center';
+    codeInput.style.textTransform = 'uppercase';
+    codeInput.style.letterSpacing = '4px';
+    codeInput.style.border = '1px solid #555';
+    codeInput.style.borderRadius = '4px';
+    codeInput.style.backgroundColor = '#242424';
+    codeInput.style.color = '#ffffff';
+    codeInput.style.outline = 'none';
+    codeInput.style.zIndex = '10';
+    codeInput.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') this.confirmJoinGame();
+    });
+    document.body.appendChild(codeInput);
+    this.joinCodeInput = codeInput;
+
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.maxLength = 20;
+    nameInput.placeholder = 'Your name';
+    nameInput.value = character.name || '';
+    nameInput.style.position = 'absolute';
+    nameInput.style.fontSize = '14px';
+    nameInput.style.padding = '6px 10px';
+    nameInput.style.width = '160px';
+    nameInput.style.textAlign = 'center';
+    nameInput.style.border = '1px solid #555';
+    nameInput.style.borderRadius = '4px';
+    nameInput.style.backgroundColor = '#242424';
+    nameInput.style.color = '#ffffff';
+    nameInput.style.outline = 'none';
+    nameInput.style.zIndex = '10';
+    nameInput.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') this.confirmJoinGame();
+    });
+    document.body.appendChild(nameInput);
+    this.joinNameInput = nameInput;
+
+    this.positionJoinHtmlInputs();
+    codeInput.focus();
+  }
+
+  positionJoinHtmlInputs() {
+    if (!this.joinCodeInput) return;
+    const canvas = this.game.canvas;
+    const rect = canvas.getBoundingClientRect();
+    const { width, height } = this.scale;
+    const cx = width / 2;
+    const cy = height / 2;
+
+    const scaleX = rect.width / width;
+    const scaleY = rect.height / height;
+
+    this.joinCodeInput.style.left = `${rect.left + (cx - 80) * scaleX}px`;
+    this.joinCodeInput.style.top = `${rect.top + (cy - 30) * scaleY}px`;
+    this.joinNameInput.style.left = `${rect.left + (cx - 80) * scaleX}px`;
+    this.joinNameInput.style.top = `${rect.top + (cy + 14) * scaleY}px`;
+  }
+
+  destroyJoinHtmlInputs() {
+    if (this.joinCodeInput) {
+      this.joinCodeInput.remove();
+      this.joinCodeInput = null;
+    }
+    if (this.joinNameInput) {
+      this.joinNameInput.remove();
+      this.joinNameInput = null;
+    }
+  }
+
+  cancelJoinPrompt() {
+    this.destroyJoinHtmlInputs();
+    this.joinLabel.destroy();
+    this.joinError.destroy();
+    this.joinConfirmBtn.destroy();
+    this.joinCancelBtn.destroy();
+    this.showStageSelect();
+  }
+
+  confirmJoinGame() {
+    const code = (this.joinCodeInput ? this.joinCodeInput.value : '').trim().toUpperCase();
+    const name = (this.joinNameInput ? this.joinNameInput.value : '').trim() || 'Player';
+
+    if (!code) {
+      this.joinError.setText('Please enter a room code');
+      return;
+    }
+
+    this.joinConfirmBtn.disableInteractive();
+    this.joinConfirmBtn.setText('Connecting...');
+    this.joinError.setText('');
+
+    const net = new NetworkManager();
+    net.on('waking-up', () => this.joinError.setText('Waking up server, this can take up to a minute...'));
+
+    net.connect(undefined, name, code)
+      .then(() => {
+        this.destroyJoinHtmlInputs();
+        this.scene.start('BootScene', { mode: 'join', network: net, isHost: false, roomCode: net.roomCode, peaceful: false });
+      })
+      .catch((err) => {
+        this.joinConfirmBtn.setInteractive({ useHandCursor: true });
+        this.joinConfirmBtn.setText('Join');
+        this.joinError.setText(err.message || 'Could not join that room');
+      });
   }
 
   showCharacterScreen() {
     this.destroyHtmlInput();
     this.stage = 'character';
+    this.title.setVisible(false);
     this.startBtn.setVisible(false);
     this.modsBtn.setVisible(false);
     this.characterBtn.setVisible(false);
+    this.modsContainer.setVisible(false);
+    this.worldListContainer.setVisible(false);
+    this.worldListBackBtn.setVisible(false);
 
     this.characterContainer.removeAll(true);
     this.character = loadCharacter();
@@ -395,77 +692,266 @@ export default class MenuScene extends Phaser.Scene {
     const panelLeft = cx - 220;
     const panelRight = cx + 60;
 
-    const heading = this.add.text(cx, cy - 170, 'Character', {
+    const heading = this.add.text(cx, cy - 230, 'Character', {
       fontFamily: 'Arial', fontSize: '28px', color: '#ffffff', fontStyle: 'bold'
     }).setOrigin(0.5);
 
     // Live preview on the left side.
-    this.previewSprite = this.add.image(panelLeft, cy - 20, 'character-preview').setScale(3);
-    const previewLabel = this.add.text(panelLeft, cy + 60, '', {
+    this.previewSprite = this.add.image(panelLeft, cy - 40, 'character-preview').setScale(3);
+    const previewLabel = this.add.text(panelLeft, cy + 40, '', {
       fontFamily: 'Arial', fontSize: '13px', color: '#ffffff', fontStyle: 'bold'
     }).setOrigin(0.5);
     this.previewLabel = previewLabel;
 
     // Name field.
-    const nameLabel = this.add.text(panelRight, cy - 130, 'Name', {
+    const nameLabel = this.add.text(panelRight, cy - 190, 'Name', {
       fontFamily: 'Arial', fontSize: '13px', color: '#cccccc'
     }).setOrigin(0, 0.5);
     this.createCharacterHtmlInput();
 
+    // Age field.
+    const ageLabel = this.add.text(panelRight, cy - 138, 'Age (1-100)', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#cccccc'
+    }).setOrigin(0, 0.5);
+    this.createCharacterAgeHtmlInput();
+
     // Gender toggle.
-    const genderLabel = this.add.text(panelRight, cy - 78, 'Gender', {
+    const genderLabel = this.add.text(panelRight, cy - 86, 'Gender', {
       fontFamily: 'Arial', fontSize: '13px', color: '#cccccc'
     }).setOrigin(0, 0.5);
     const genderOffStyle = { fontFamily: 'Arial', fontSize: '12px', color: '#aaaaaa', backgroundColor: '#242424', padding: { x: 10, y: 5 } };
     const genderOnStyle = { fontFamily: 'Arial', fontSize: '12px', color: '#ffffff', backgroundColor: '#3a6b3a', padding: { x: 10, y: 5 } };
-    this.maleBtn = this.add.text(panelRight, cy - 58, 'Male', genderOffStyle).setOrigin(0, 0)
+    this.maleBtn = this.add.text(panelRight, cy - 66, 'Male', genderOffStyle).setOrigin(0, 0)
       .setInteractive({ useHandCursor: true })
       .on('pointerdown', () => this.setCharacterGender('male'));
-    this.femaleBtn = this.add.text(panelRight + 70, cy - 58, 'Female', genderOffStyle).setOrigin(0, 0)
+    this.femaleBtn = this.add.text(panelRight + 55, cy - 66, 'Female', genderOffStyle).setOrigin(0, 0)
       .setInteractive({ useHandCursor: true })
       .on('pointerdown', () => this.setCharacterGender('female'));
+    this.noGenderBtn = this.add.text(panelRight + 122, cy - 66, 'No Gender', genderOffStyle).setOrigin(0, 0)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.setCharacterGender('none'));
     this.genderOnStyle = genderOnStyle;
     this.genderOffStyle = genderOffStyle;
 
-    // Hair style picker.
-    const hairLabel = this.add.text(panelRight, cy - 20, 'Hair Style', {
+    // Hair style picker, with a tab per gender.
+    const hairLabel = this.add.text(panelRight, cy - 28, 'Hair Style', {
       fontFamily: 'Arial', fontSize: '13px', color: '#cccccc'
     }).setOrigin(0, 0.5);
-    this.hairBtns = {};
-    HAIR_STYLES.forEach((h, i) => {
-      const btn = this.add.text(panelRight + (i % 2) * 75, cy + (Math.floor(i / 2) * 26), h.label, genderOffStyle)
-        .setOrigin(0, 0)
-        .setInteractive({ useHandCursor: true })
-        .on('pointerdown', () => this.setCharacterHair(h.id));
-      this.hairBtns[h.id] = btn;
-    });
 
-    // Color swatches.
-    const colorLabel = this.add.text(panelRight, cy + 58, 'Color', {
+    this.hairTab = null;
+    const tabOffStyle = { fontFamily: 'Arial', fontSize: '11px', color: '#888888', backgroundColor: '#1c1c1c', padding: { x: 9, y: 4 } };
+    const tabOnStyle = { fontFamily: 'Arial', fontSize: '11px', color: '#ffffff', backgroundColor: '#3a3a6b', padding: { x: 9, y: 4 } };
+    this.hairTabOnStyle = tabOnStyle;
+    this.hairTabOffStyle = tabOffStyle;
+    this.hairTabMaleBtn = this.add.text(panelRight, cy - 8, 'Male Styles ▸', tabOffStyle).setOrigin(0, 0)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.toggleHairTab('male'));
+    this.hairTabFemaleBtn = this.add.text(panelRight + 90, cy - 8, 'Female Styles ▸', tabOffStyle).setOrigin(0, 0)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.toggleHairTab('female'));
+
+    this.hairGridOrigin = { x: panelRight, y: cy + 14 };
+    this.hairBtnStyleOn = { fontFamily: 'Arial', fontSize: '10px', color: '#ffffff', backgroundColor: '#3a6b3a', padding: { x: 6, y: 4 } };
+    this.hairBtnStyleOff = { fontFamily: 'Arial', fontSize: '10px', color: '#aaaaaa', backgroundColor: '#242424', padding: { x: 6, y: 4 } };
+    this.hairBtns = {};
+    this.hairGridItems = [];
+    this.rebuildHairGrid();
+
+    // Color swatches, with Skin Tone / Hair Color tabs that swap into this same slot when toggled.
+    this.swatchSectionY = cy + 184;
+    this.colorLabel = this.add.text(panelRight, this.swatchSectionY, 'Color', {
       fontFamily: 'Arial', fontSize: '13px', color: '#cccccc'
     }).setOrigin(0, 0.5);
+    const swatchCols = 8;
     this.colorSwatches = CHARACTER_COLORS.map((color, i) => {
-      const swatch = this.add.rectangle(panelRight + i * 26, cy + 78, 20, 20, color, 1)
+      const col = i % swatchCols;
+      const row = Math.floor(i / swatchCols);
+      const swatch = this.add.rectangle(panelRight + col * 26, this.swatchSectionY + 20 + row * 26, 20, 20, color, 1)
         .setOrigin(0, 0)
+        .setStrokeStyle(1, 0x000000, 0.4)
         .setInteractive({ useHandCursor: true })
         .on('pointerdown', () => this.setCharacterColor(color));
       return { color, swatch };
     });
 
-    const backBtn = this.add.text(cx, cy + 150, '< Back', {
+    // Skin tone and hair color tabs, positioned beside the Color label. Toggling one
+    // hides the shirt Color swatches and shows that tab's swatches in the same slot.
+    this.skinToneTabOpen = false;
+    this.skinToneTabBtn = this.add.text(panelRight + 215, this.swatchSectionY, 'Skin Tone ▸', tabOffStyle).setOrigin(0, 0.5)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.toggleSkinToneTab());
+    this.skinToneGridOrigin = { x: panelRight, y: this.swatchSectionY + 20 };
+    this.skinToneSwatches = [];
+
+    this.hairColorTabOpen = false;
+    this.hairColorTabBtn = this.add.text(panelRight + 215, this.swatchSectionY + 26, 'Hair Color ▸', tabOffStyle).setOrigin(0, 0.5)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.toggleHairColorTab());
+    this.hairColorGridOrigin = { x: panelRight, y: this.swatchSectionY + 20 };
+    this.hairColorSwatches = [];
+
+    const backBtn = this.add.text(cx - 40, cy + 234, '< Back', {
       fontFamily: 'Arial', fontSize: '14px', color: '#aaaaaa', backgroundColor: '#242424', padding: { x: 10, y: 6 }
     }).setOrigin(0.5)
       .setInteractive({ useHandCursor: true })
       .on('pointerdown', () => this.saveAndExitCharacterScreen());
+    this.characterBackBtn = backBtn;
 
     this.characterContainer.add([
-      heading, this.previewSprite, previewLabel, nameLabel, genderLabel, this.maleBtn, this.femaleBtn,
-      hairLabel, ...Object.values(this.hairBtns), colorLabel,
-      ...this.colorSwatches.map(s => s.swatch), backBtn
+      heading, this.previewSprite, previewLabel, nameLabel, ageLabel, genderLabel, this.maleBtn, this.femaleBtn, this.noGenderBtn,
+      hairLabel, this.hairTabMaleBtn, this.hairTabFemaleBtn, this.colorLabel,
+      ...this.colorSwatches.map(s => s.swatch),
+      this.skinToneTabBtn, this.hairColorTabBtn,
+      backBtn
     ]);
     this.characterContainer.setVisible(true);
 
+    this.updateSwatchSectionVisibility();
     this.refreshCharacterUI();
+    this.startPreviewWalkAnimation();
+    this.repositionCharacterBottomUI();
+  }
+
+  toggleSkinToneTab() {
+    this.skinToneTabOpen = !this.skinToneTabOpen;
+    if (this.skinToneTabOpen) this.hairColorTabOpen = false;
+    this.updateSwatchSectionVisibility();
+    this.rebuildSkinToneGrid();
+    this.rebuildHairColorGrid();
+    this.refreshCharacterUI();
+    this.repositionCharacterBottomUI();
+  }
+
+  toggleHairColorTab() {
+    this.hairColorTabOpen = !this.hairColorTabOpen;
+    if (this.hairColorTabOpen) this.skinToneTabOpen = false;
+    this.updateSwatchSectionVisibility();
+    this.rebuildSkinToneGrid();
+    this.rebuildHairColorGrid();
+    this.refreshCharacterUI();
+    this.repositionCharacterBottomUI();
+  }
+
+  updateSwatchSectionVisibility() {
+    const anyTabOpen = this.skinToneTabOpen || this.hairColorTabOpen;
+    this.colorLabel.setVisible(!anyTabOpen);
+    this.colorSwatches.forEach(s => s.swatch.setVisible(!anyTabOpen));
+  }
+
+  rebuildSkinToneGrid() {
+    this.skinToneSwatches.forEach(s => s.swatch.destroy());
+    this.skinToneSwatches = [];
+    if (!this.skinToneTabOpen) return;
+
+    const { x, y } = this.skinToneGridOrigin;
+    this.skinToneSwatches = SKIN_TONES.map((color, i) => {
+      const swatch = this.add.rectangle(x + i * 26, y, 20, 20, color, 1)
+        .setOrigin(0, 0)
+        .setStrokeStyle(1, 0x000000, 0.4)
+        .setInteractive({ useHandCursor: true })
+        .on('pointerdown', () => this.setCharacterSkinTone(color));
+      return { color, swatch };
+    });
+    this.characterContainer.add(this.skinToneSwatches.map(s => s.swatch));
+  }
+
+  rebuildHairColorGrid() {
+    this.hairColorSwatches.forEach(s => s.swatch.destroy());
+    this.hairColorSwatches = [];
+    if (!this.hairColorTabOpen) return;
+
+    const { x, y } = this.hairColorGridOrigin;
+    this.hairColorSwatches = HAIR_COLORS.map((color, i) => {
+      const col = i % 8;
+      const row = Math.floor(i / 8);
+      const swatch = this.add.rectangle(x + col * 26, y + row * 26, 20, 20, color, 1)
+        .setOrigin(0, 0)
+        .setStrokeStyle(1, 0x000000, 0.4)
+        .setInteractive({ useHandCursor: true })
+        .on('pointerdown', () => this.setCharacterHairColor(color));
+      return { color, swatch };
+    });
+    this.characterContainer.add(this.hairColorSwatches.map(s => s.swatch));
+  }
+
+  repositionCharacterBottomUI() {
+    const { width, height } = this.scale;
+    const cx = width / 2;
+    const cy = height / 2;
+    const panelRight = cx + 60;
+
+    // Tab buttons stay fixed beside the Color row; whichever tab is open swaps its
+    // swatch grid into the same slot the shirt Color swatches normally occupy.
+    this.skinToneTabBtn.setPosition(panelRight + 215, this.swatchSectionY);
+    this.hairColorTabBtn.setPosition(panelRight + 215, this.swatchSectionY + 26);
+
+    const y = this.swatchSectionY + 20;
+    if (this.skinToneTabOpen) {
+      this.skinToneGridOrigin = { x: panelRight, y };
+      this.skinToneSwatches.forEach((s, i) => s.swatch.setPosition(panelRight + i * 26, y));
+    } else if (this.hairColorTabOpen) {
+      this.hairColorGridOrigin = { x: panelRight, y };
+      this.hairColorSwatches.forEach((s, i) => {
+        const col = i % 8;
+        const row = Math.floor(i / 8);
+        s.swatch.setPosition(panelRight + col * 26, y + row * 26);
+      });
+    }
+
+    // Back button position is fixed regardless of which tab (if any) is open.
+    this.characterBackBtn.setPosition(cx - 40, this.swatchSectionY + 50);
+  }
+
+  startPreviewWalkAnimation() {
+    this.stopPreviewWalkAnimation();
+    this.previewWalkToggle = false;
+    this.previewWalkTimer = this.time.addEvent({
+      delay: 220,
+      loop: true,
+      callback: () => {
+        if (!this.previewSprite) return;
+        this.previewWalkToggle = !this.previewWalkToggle;
+        this.previewSprite.setTexture(this.previewWalkToggle ? 'character-preview-walk1' : 'character-preview-walk2');
+      }
+    });
+  }
+
+  stopPreviewWalkAnimation() {
+    if (this.previewWalkTimer) {
+      this.previewWalkTimer.remove();
+      this.previewWalkTimer = null;
+    }
+  }
+
+  toggleHairTab(tab) {
+    this.hairTab = this.hairTab === tab ? null : tab;
+    this.rebuildHairGrid();
+    this.refreshCharacterUI();
+  }
+
+  rebuildHairGrid() {
+    this.hairGridItems.forEach(btn => btn.destroy());
+    this.hairGridItems = [];
+    this.hairBtns = {};
+
+    if (!this.hairTab) return;
+
+    const styles = this.hairTab === 'female' ? FEMALE_HAIR_STYLES : MALE_HAIR_STYLES;
+    const { x, y } = this.hairGridOrigin;
+    const cols = 3;
+    const colWidth = 84;
+    const rowHeight = 22;
+
+    styles.forEach((h, i) => {
+      const btn = this.add.text(x + (i % cols) * colWidth, y + Math.floor(i / cols) * rowHeight, h.label, this.hairBtnStyleOff)
+        .setOrigin(0, 0)
+        .setInteractive({ useHandCursor: true })
+        .on('pointerdown', () => this.setCharacterHair(h.id));
+      this.hairBtns[h.id] = btn;
+      this.hairGridItems.push(btn);
+    });
+
+    this.characterContainer.add(this.hairGridItems);
   }
 
   setCharacterGender(gender) {
@@ -483,28 +969,62 @@ export default class MenuScene extends Phaser.Scene {
     this.refreshCharacterUI();
   }
 
+  setCharacterSkinTone(color) {
+    this.character.skinTone = color;
+    this.refreshCharacterUI();
+  }
+
+  setCharacterHairColor(color) {
+    this.character.hairColor = color;
+    this.refreshCharacterUI();
+  }
+
   refreshCharacterUI() {
     this.maleBtn.setStyle(this.character.gender === 'male' ? this.genderOnStyle : this.genderOffStyle);
     this.femaleBtn.setStyle(this.character.gender === 'female' ? this.genderOnStyle : this.genderOffStyle);
+    this.noGenderBtn.setStyle(this.character.gender === 'none' ? this.genderOnStyle : this.genderOffStyle);
+
+    this.hairTabMaleBtn.setStyle(this.hairTab === 'male' ? this.hairTabOnStyle : this.hairTabOffStyle);
+    this.hairTabFemaleBtn.setStyle(this.hairTab === 'female' ? this.hairTabOnStyle : this.hairTabOffStyle);
+
+    this.skinToneTabBtn.setStyle(this.skinToneTabOpen ? this.hairTabOnStyle : this.hairTabOffStyle);
+    this.skinToneTabBtn.setText(this.skinToneTabOpen ? 'Skin Tone ▾' : 'Skin Tone ▸');
+    this.hairColorTabBtn.setStyle(this.hairColorTabOpen ? this.hairTabOnStyle : this.hairTabOffStyle);
+    this.hairColorTabBtn.setText(this.hairColorTabOpen ? 'Hair Color ▾' : 'Hair Color ▸');
 
     Object.entries(this.hairBtns).forEach(([id, btn]) => {
-      btn.setStyle(this.character.hair === id ? this.genderOnStyle : this.genderOffStyle);
+      btn.setStyle(this.character.hair === id ? this.hairBtnStyleOn : this.hairBtnStyleOff);
     });
 
     this.colorSwatches.forEach(({ color, swatch }) => {
-      swatch.setStrokeStyle(this.character.color === color ? 3 : 0, 0xffe066);
+      swatch.setStrokeStyle(this.character.color === color ? 3 : 1, this.character.color === color ? 0xffe066 : 0x000000, this.character.color === color ? 1 : 0.4);
+    });
+
+    this.skinToneSwatches.forEach(({ color, swatch }) => {
+      swatch.setStrokeStyle(this.character.skinTone === color ? 3 : 1, this.character.skinTone === color ? 0xffe066 : 0x000000, this.character.skinTone === color ? 1 : 0.4);
+    });
+
+    this.hairColorSwatches.forEach(({ color, swatch }) => {
+      swatch.setStrokeStyle(this.character.hairColor === color ? 3 : 1, this.character.hairColor === color ? 0xffe066 : 0x000000, this.character.hairColor === color ? 1 : 0.4);
     });
 
     this.generateCharacterPreviewTexture();
     this.previewSprite.setTexture('character-preview');
+    this.previewSprite.setScale(3 * ageToScale(this.character.age));
 
     const name = this.characterHtmlInput ? this.characterHtmlInput.value.trim() : this.character.name;
     this.previewLabel.setText(name || 'Player');
   }
 
   generateCharacterPreviewTexture() {
-    if (this.textures.exists('character-preview')) {
-      this.textures.remove('character-preview');
+    this.drawCharacterPreviewFrame('character-preview', 0);
+    this.drawCharacterPreviewFrame('character-preview-walk1', -4);
+    this.drawCharacterPreviewFrame('character-preview-walk2', 4);
+  }
+
+  drawCharacterPreviewFrame(key, legOffset) {
+    if (this.textures.exists(key)) {
+      this.textures.remove(key);
     }
 
     const size = 40;
@@ -513,6 +1033,33 @@ export default class MenuScene extends Phaser.Scene {
 
     g.fillStyle(0x000000, 0.3);
     g.fillEllipse(cx, size - 4, size * 0.5, size * 0.16);
+
+    // Legs, drawn under the torso so the hem/shirt overlaps the tops.
+    // Each leg is a hinged quad: top stays fixed at the hip, bottom (foot) swings by
+    // legOffset, so the leg pivots like a real stride instead of sliding as a rigid block.
+    // Female legs are narrower and set closer together to fit the tapered hem.
+    const hipY = size * 0.62;
+    const footY = size - 2;
+    const isFemale = this.character.gender === 'female';
+    const legW = isFemale ? 4 : 5;
+    const legInsetLeft = isFemale ? cx - 6 : cx - 7;
+    const legInsetRight = cx + 2;
+    const skinTone = this.character.skinTone || 0xe8b98a;
+    g.fillStyle(skinTone, 1);
+    [-1, 1].forEach(side => {
+      const hipLeft = side < 0 ? legInsetLeft : legInsetRight;
+      const footShift = side < 0 ? legOffset : -legOffset;
+      g.beginPath();
+      g.moveTo(hipLeft, hipY);
+      g.lineTo(hipLeft + legW, hipY);
+      g.lineTo(hipLeft + legW + footShift, footY);
+      g.lineTo(hipLeft + footShift, footY);
+      g.closePath();
+      g.fillPath();
+    });
+    g.fillStyle(0x5a3a20, 1);
+    g.fillRoundedRect(legInsetLeft + legOffset, size - 6, legW, 4, 1.5);
+    g.fillRoundedRect(legInsetRight - legOffset, size - 6, legW, 4, 1.5);
 
     g.fillStyle(this.character.color, 1);
     if (this.character.gender === 'female') {
@@ -530,31 +1077,16 @@ export default class MenuScene extends Phaser.Scene {
       g.fillRoundedRect(cx - 10, size * 0.42, 20, 16, 3);
     }
 
-    g.fillStyle(0xe8b98a, 1);
+    g.fillStyle(skinTone, 1);
     g.fillCircle(cx, size * 0.36, 10);
 
-    const hairColor = 0x3a2a1e;
-    if (this.character.hair === 'long') {
-      g.fillStyle(hairColor, 1);
-      g.fillEllipse(cx, size * 0.27, 21, 13);
-      g.fillEllipse(cx - 9, size * 0.42, 5, 10);
-      g.fillEllipse(cx + 9, size * 0.42, 5, 10);
-    } else if (this.character.hair === 'ponytail') {
-      g.fillStyle(hairColor, 1);
-      g.fillEllipse(cx, size * 0.28, 20, 12);
-      g.fillEllipse(cx + 10, size * 0.36, 4, 9);
-    } else if (this.character.hair === 'bald') {
-      // No hair.
-    } else {
-      g.fillStyle(hairColor, 1);
-      g.fillEllipse(cx, size * 0.28, 20, 12);
-    }
+    drawHairShape(g, this.character.hair, cx, size, this.character.hairColor);
 
     g.fillStyle(0x2a2a2e, 1);
     g.fillCircle(cx - 3.5, size * 0.41, 1.6);
     g.fillCircle(cx + 3.5, size * 0.41, 1.6);
 
-    g.generateTexture('character-preview', size, size);
+    g.generateTexture(key, size, size);
     g.destroy();
   }
 
@@ -599,7 +1131,7 @@ export default class MenuScene extends Phaser.Scene {
     const scaleY = rect.height / height;
 
     this.characterHtmlInput.style.left = `${rect.left + (panelRight - 10) * scaleX}px`;
-    this.characterHtmlInput.style.top = `${rect.top + (cy - 130 + 14) * scaleY}px`;
+    this.characterHtmlInput.style.top = `${rect.top + (cy - 190 + 14) * scaleY}px`;
   }
 
   destroyCharacterHtmlInput() {
@@ -607,14 +1139,74 @@ export default class MenuScene extends Phaser.Scene {
       this.characterHtmlInput.remove();
       this.characterHtmlInput = null;
     }
+    this.destroyCharacterAgeHtmlInput();
+  }
+
+  createCharacterAgeHtmlInput() {
+    this.destroyCharacterAgeHtmlInput();
+
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '1';
+    input.max = '100';
+    input.placeholder = '25';
+    input.value = this.character.age || 25;
+    input.style.position = 'absolute';
+    input.style.fontSize = '14px';
+    input.style.padding = '5px 8px';
+    input.style.width = '70px';
+    input.style.border = '1px solid #555';
+    input.style.borderRadius = '4px';
+    input.style.backgroundColor = '#242424';
+    input.style.color = '#ffffff';
+    input.style.outline = 'none';
+    input.style.zIndex = '10';
+
+    input.addEventListener('keydown', (e) => e.stopPropagation());
+    input.addEventListener('input', () => {
+      const clamped = Phaser.Math.Clamp(parseInt(input.value, 10) || 1, 1, 100);
+      this.character.age = clamped;
+      this.refreshCharacterUI();
+    });
+
+    document.body.appendChild(input);
+    this.characterAgeHtmlInput = input;
+    this.positionCharacterAgeHtmlInput();
+  }
+
+  positionCharacterAgeHtmlInput() {
+    if (!this.characterAgeHtmlInput) return;
+    const canvas = this.game.canvas;
+    const rect = canvas.getBoundingClientRect();
+    const { width, height } = this.scale;
+    const cx = width / 2;
+    const cy = height / 2;
+    const panelRight = cx + 60;
+
+    const scaleX = rect.width / width;
+    const scaleY = rect.height / height;
+
+    this.characterAgeHtmlInput.style.left = `${rect.left + (panelRight - 10) * scaleX}px`;
+    this.characterAgeHtmlInput.style.top = `${rect.top + (cy - 138 + 14) * scaleY}px`;
+  }
+
+  destroyCharacterAgeHtmlInput() {
+    if (this.characterAgeHtmlInput) {
+      this.characterAgeHtmlInput.remove();
+      this.characterAgeHtmlInput = null;
+    }
   }
 
   saveAndExitCharacterScreen() {
     if (this.characterHtmlInput) {
       this.character.name = this.characterHtmlInput.value.trim() || 'Player';
     }
+    if (this.characterAgeHtmlInput) {
+      this.character.age = Phaser.Math.Clamp(parseInt(this.characterAgeHtmlInput.value, 10) || 25, 1, 100);
+    }
     saveCharacter(this.character);
     this.destroyCharacterHtmlInput();
+    this.stopPreviewWalkAnimation();
     this.showStart();
   }
 
@@ -623,6 +1215,7 @@ export default class MenuScene extends Phaser.Scene {
     this.startBtn.setVisible(false);
     this.newGameBtn.setVisible(false);
     this.loadGameBtn.setVisible(false);
+    this.joinGameBtn.setVisible(false);
     this.backBtn.setVisible(false);
     this.noSaveHint.setVisible(false);
     this.worldListBackBtn.setVisible(true);
