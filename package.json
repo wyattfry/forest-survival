@@ -1,0 +1,17 @@
+{
+  "name": "phaser-boilerplate",
+  "version": "0.1.0",
+  "description": "Boilerplate Phaser 2D game template",
+  "main": "index.js",
+  "scripts": {
+    "start": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "phaser": "^3.55.2"
+  },
+  "devDependencies": {
+    "vite": "^4.5.0"
+  }
+}
