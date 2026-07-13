@@ -1,11 +1,24 @@
 import Phaser from 'phaser';
 import { loadWorld, writeWorld, listWorlds, loadCharacter } from '../SaveManager.js';
 import { drawHairShape, ageToScale } from '../HairStyles.js';
+import { drawHatShape } from '../Hats.js';
 import { preloadSounds, playChopSound, playFootstepSound, playArrowShootSound, playArrowHitSound } from '../SoundManager.js';
 import RemotePlayer from '../entities/RemotePlayer.js';
 
 const WORLD_WIDTH = 2400;
 const WORLD_HEIGHT = 1800;
+const SHOP_ITEMS_PER_PAGE = 7;
+const SHOP_PRICES = {
+  twig: 1, pebble: 1, wood: 3, stone_chunk: 4, string: 5, arrow_item: 2,
+  iron_ore: 8, iron_ingot: 15, bone: 4, obsidian: 25,
+  campfire: 12, log_seat: 10, furnace: 25, crafting_table: 30,
+  wall: 8, door: 10, roof: 10, chair: 8, table: 12, steps: 8,
+  axe: 20, pickaxe: 25, sword: 30, bow: 35,
+  ak47: 150, famas: 175, glock17: 100,
+  iron_helmet: 45, iron_chestplate: 60, iron_arm_piece: 40,
+  iron_gauntlet: 40, iron_leggings: 55, iron_armor_set: 200,
+  bucket: 20, bucket_water: 30, bucket_lava: 50
+};
 
 export default class BootScene extends Phaser.Scene {
   constructor() {
@@ -32,8 +45,8 @@ export default class BootScene extends Phaser.Scene {
 
     // Multiplayer wiring: `network` is a connected NetworkManager passed from MenuScene
     // (host created a room, or guest joined one via room code). Host runs the real
-    // simulation and broadcasts snapshots; guests additionally run their own local
-    // world for now and just render other players as remote ghosts (see RemotePlayer).
+    // simulation and broadcasts snapshots. Guests render authoritative mob state
+    // from those snapshots while their local player remains client-controlled.
     this.network = data && data.network;
     this.isMultiplayerHost = !!(data && data.isHost);
     this.roomCode = data && data.roomCode;
@@ -45,8 +58,11 @@ export default class BootScene extends Phaser.Scene {
     this.characterGender = character.gender;
     this.characterHair = character.hair;
     this.characterAge = character.age;
+    this.characterGiant = !!character.giant;
+    this.characterDwarf = !!character.dwarf;
     this.characterSkinTone = character.skinTone;
     this.characterHairColor = character.hairColor;
+    this.characterHat = character.hat || 'none';
   }
 
   preload() {
@@ -81,7 +97,9 @@ export default class BootScene extends Phaser.Scene {
     this.setupInventory();
     this.setupToolUse();
     this.setupCombat();
+    this.setupCoinCounter();
     this.scatterPools();
+    this.setupWorldShop();
     if (!this.peaceful) {
       this.spawnSkeletons();
     } else {
@@ -218,12 +236,16 @@ export default class BootScene extends Phaser.Scene {
   setupMultiplayer() {
     if (!this.network) return;
 
+    this.hostGuestStates = new Map();
+    this.nextInputTime = 0;
     this.showRoomCodeHud();
+    this.setupMultiplayerChat();
 
     this.network.on('player-joined', (msg) => this.addRemotePlayer(msg));
     this.network.on('player-left', (msg) => this.removeRemotePlayer(msg.id));
     this.network.on('host-left', () => this.handleHostLeft());
     this.network.on('disconnected', () => this.handleNetworkDisconnected());
+    this.network.on('chat-message', (msg) => this.addChatMessage(msg));
 
     // Any players already in the room when we connected (host sees guests who
     // joined before it started the world; a guest sees players already present).
@@ -233,6 +255,7 @@ export default class BootScene extends Phaser.Scene {
 
     if (this.isMultiplayerHost) {
       this.network.on('input', (msg) => this.handleRemoteInput(msg));
+      this.network.send('world-config', { peaceful: this.peaceful });
       this.network.send('start-game', {});
       this.nextSnapshotTime = 0;
     } else {
@@ -241,8 +264,93 @@ export default class BootScene extends Phaser.Scene {
     }
 
     this.events.on('shutdown', () => {
+      this.destroyMultiplayerChat();
       if (this.network) this.network.disconnect();
     });
+  }
+
+  setupMultiplayerChat() {
+    this.chatMessages = [];
+    this.chatLogText = this.add.text(12, this.scale.height - 54, '', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#ffffff',
+      backgroundColor: 'rgba(20,20,20,0.72)', padding: { x: 8, y: 6 },
+      wordWrap: { width: 320 }
+    }).setOrigin(0, 1).setScrollFactor(0).setDepth(2600000);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.maxLength = 200;
+    input.placeholder = 'Chat — press Enter to send';
+    input.setAttribute('aria-label', 'Multiplayer chat message');
+    Object.assign(input.style, {
+      position: 'absolute', boxSizing: 'border-box', zIndex: '20',
+      fontFamily: 'Arial', fontSize: '13px', padding: '7px 9px',
+      color: '#ffffff', background: 'rgba(26,26,26,0.92)',
+      border: '1px solid #666666', borderRadius: '4px', outline: 'none'
+    });
+
+    input.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        const text = input.value.trim();
+        if (text) this.network.send('chat-message', { text });
+        input.value = '';
+        input.blur();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        input.value = '';
+        input.blur();
+      }
+    });
+
+    document.body.appendChild(input);
+    this.chatHtmlInput = input;
+    this.chatFocusHandler = (event) => {
+      if (event.key !== 'Enter' || document.activeElement === input) return;
+      event.preventDefault();
+      event.stopPropagation();
+      input.focus();
+    };
+    window.addEventListener('keydown', this.chatFocusHandler, true);
+    this.positionMultiplayerChat();
+    this.chatResizeHandler = () => this.positionMultiplayerChat();
+    this.scale.on('resize', this.chatResizeHandler);
+  }
+
+  positionMultiplayerChat() {
+    if (!this.chatHtmlInput || !this.chatLogText) return;
+    const rect = this.game.canvas.getBoundingClientRect();
+    const scaleX = rect.width / this.scale.width;
+    const scaleY = rect.height / this.scale.height;
+    this.chatHtmlInput.style.left = `${window.scrollX + rect.left + 12 * scaleX}px`;
+    this.chatHtmlInput.style.top = `${window.scrollY + rect.top + (this.scale.height - 40) * scaleY}px`;
+    this.chatHtmlInput.style.width = `${300 * scaleX}px`;
+    this.chatHtmlInput.style.height = `${32 * scaleY}px`;
+    this.chatLogText.setPosition(12, this.scale.height - 48);
+  }
+
+  addChatMessage(msg) {
+    if (!msg || typeof msg.text !== 'string') return;
+    const name = msg.name || 'Player';
+    this.chatMessages.push(`${name}: ${msg.text}`);
+    this.chatMessages = this.chatMessages.slice(-8);
+    this.chatLogText.setText(this.chatMessages.join('\n'));
+  }
+
+  destroyMultiplayerChat() {
+    if (this.chatHtmlInput) {
+      this.chatHtmlInput.remove();
+      this.chatHtmlInput = null;
+    }
+    if (this.chatFocusHandler) {
+      window.removeEventListener('keydown', this.chatFocusHandler, true);
+      this.chatFocusHandler = null;
+    }
+    if (this.chatResizeHandler) {
+      this.scale.off('resize', this.chatResizeHandler);
+      this.chatResizeHandler = null;
+    }
   }
 
   showRoomCodeHud() {
@@ -263,6 +371,12 @@ export default class BootScene extends Phaser.Scene {
     const spawn = this.player ? { x: this.player.x, y: this.player.y } : { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
     const remote = new RemotePlayer(this, spawn.x, spawn.y, info.color, info.name, !!info.isHost);
     this.remotePlayers.set(info.id, remote);
+    if (this.isMultiplayerHost && !info.isHost) {
+      this.hostGuestStates.set(info.id, {
+        id: info.id, x: spawn.x, y: spawn.y, hp: 20,
+        moveX: 0, moveY: 0, lastInputTime: this.time.now
+      });
+    }
   }
 
   removeRemotePlayer(id) {
@@ -270,6 +384,7 @@ export default class BootScene extends Phaser.Scene {
     if (!remote) return;
     remote.destroy();
     this.remotePlayers.delete(id);
+    this.hostGuestStates.delete(id);
   }
 
   handleHostLeft() {
@@ -286,23 +401,137 @@ export default class BootScene extends Phaser.Scene {
     // via the browser console for now.
   }
 
-  // Host-only: receives raw input from a guest and is the hook point for applying
-  // it to that guest's representation. Movement/actions for guests are not yet
-  // simulated by the host (guests currently run their own local world) — this
-  // exists so the wiring is in place for the next pass.
+  // Host-only: validate guest movement input. The host integrates this direction
+  // state each frame and publishes the resulting authoritative position.
   handleRemoteInput(msg) {
-    // Intentionally minimal for now; see class-level note above.
+    const state = this.hostGuestStates.get(msg.fromId);
+    if (!state) return;
+    if (msg.inputKind === 'movement') {
+      const moveX = Number(msg.moveX);
+      const moveY = Number(msg.moveY);
+      if (!Number.isFinite(moveX) || !Number.isFinite(moveY)) return;
+      const length = Math.hypot(moveX, moveY);
+      state.moveX = length > 1 ? moveX / length : Phaser.Math.Clamp(moveX, -1, 1);
+      state.moveY = length > 1 ? moveY / length : Phaser.Math.Clamp(moveY, -1, 1);
+      state.lastInputTime = this.time.now;
+    } else if (msg.inputKind === 'attack') {
+      this.handleRemoteAttack(state, msg);
+    } else if (msg.inputKind === 'chop' || msg.inputKind === 'mine') {
+      this.handleRemoteResourceHit(state, msg);
+    }
   }
 
-  // Host-only: broadcasts a lightweight snapshot of this client's own player
-  // position plus authoritative day/night state. Call from update().
+  // Host-only: validate a guest's melee attack intent against authoritative
+  // positions before applying damage, so a guest can't claim hits it isn't in
+  // range for. The guest's own local hit/animation is purely cosmetic.
+  handleRemoteAttack(guestState, msg) {
+    const skeleton = this.skeletons.find(s => s.networkId === msg.targetId);
+    if (!skeleton || skeleton.dead) return;
+    const range = 60; // slightly above the local 50px range to tolerate lag.
+    const dist = Phaser.Math.Distance.Between(guestState.x, guestState.y, skeleton.sprite.x, skeleton.sprite.y);
+    if (dist > range) return;
+    const now = this.time.now;
+    if (guestState.lastAttackTime && now - guestState.lastAttackTime < 350) return;
+    guestState.lastAttackTime = now;
+    this.damageSkeleton(skeleton);
+  }
+
+  // Host-only: validate a guest's chop/mine intent against authoritative node state
+  // and the guest's authoritative position, then apply the hit exactly as a local
+  // hit would. The resulting hit/destruction and, if the node was destroyed, the
+  // resource grant are broadcast as a world-event so every client (including the
+  // guest that landed the hit) stays in sync — the guest never mutates the node or
+  // its own inventory locally.
+  handleRemoteResourceHit(guestState, msg) {
+    const kind = msg.inputKind === 'chop' ? 'tree' : 'rock';
+    const list = kind === 'tree' ? this.choppableTrees : this.breakableRocks;
+    const target = list.find(t => t.networkId === msg.targetId);
+    if (!target) return;
+
+    const range = 70; // slightly above the local 60px use range to tolerate lag.
+    const dist = Phaser.Math.Distance.Between(guestState.x, guestState.y, target.x, target.y);
+    if (dist > range) return;
+
+    const now = this.time.now;
+    if (guestState.lastToolTime && now - guestState.lastToolTime < 350) return;
+    guestState.lastToolTime = now;
+
+    // Apply on the host without granting the host's own inventory — the resource
+    // grant belongs to the guest named in forId, applied when they receive this
+    // event back (see applyNodeHitEvent).
+    this.hitTarget(target, kind, false);
+
+    this.network.send('world-event', {
+      kind: 'node-hit',
+      nodeKind: kind,
+      targetId: msg.targetId,
+      forId: guestState.id
+    });
+  }
+
+  sendLocalMovementInput() {
+    if (!this.network || this.isMultiplayerHost || this.time.now < this.nextInputTime) return;
+    this.nextInputTime = this.time.now + 50;
+    const velocity = this.player.body.velocity;
+    const length = Math.hypot(velocity.x, velocity.y);
+    this.network.send('input', {
+      inputKind: 'movement',
+      moveX: length > 0 ? velocity.x / length : 0,
+      moveY: length > 0 ? velocity.y / length : 0
+    });
+  }
+
+  updateHostGuestStates() {
+    if (!this.network || !this.isMultiplayerHost) return;
+    const dt = Math.min(this.game.loop.delta, 100) / 1000;
+    const speed = 220;
+    this.hostGuestStates.forEach((state, id) => {
+      if (this.time.now - state.lastInputTime > 250) {
+        state.moveX = 0;
+        state.moveY = 0;
+      }
+      state.x = Phaser.Math.Clamp(state.x + state.moveX * speed * dt, 20, WORLD_WIDTH - 20);
+      state.y = Phaser.Math.Clamp(state.y + state.moveY * speed * dt, 20, WORLD_HEIGHT - 20);
+      const remote = this.remotePlayers.get(id);
+      if (remote) remote.applyState(state);
+    });
+  }
+
+  reconcileLocalPlayer() {
+    if (!this.localAuthoritativeState) return;
+    const state = this.localAuthoritativeState;
+    const distance = Phaser.Math.Distance.Between(this.player.x, this.player.y, state.x, state.y);
+    if (distance > 120) {
+      this.player.setPosition(state.x, state.y);
+    } else if (distance > 6) {
+      this.player.x = Phaser.Math.Linear(this.player.x, state.x, 0.12);
+      this.player.y = Phaser.Math.Linear(this.player.y, state.y, 0.12);
+    }
+  }
+
+  // Host-only: broadcasts all authoritative player and mob state plus day/night.
   broadcastWorldSnapshot() {
     if (!this.network || !this.isMultiplayerHost || !this.player) return;
     if (this.time.now < (this.nextSnapshotTime || 0)) return;
     this.nextSnapshotTime = this.time.now + 100;
 
+    const players = [
+      { id: this.network.id, x: this.player.x, y: this.player.y, hp: this.playerHp },
+      ...Array.from(this.hostGuestStates.values(), state => ({
+        id: state.id, x: state.x, y: state.y, hp: state.hp
+      }))
+    ];
+
     this.network.send('world-snapshot', {
-      players: [{ id: this.network.id, x: this.player.x, y: this.player.y, hp: this.playerHp }],
+      players,
+      mobs: this.skeletons.map((skeleton) => ({
+        id: skeleton.networkId,
+        kind: skeleton.type,
+        x: skeleton.sprite.x,
+        y: skeleton.sprite.y,
+        hp: skeleton.hp,
+        maxHp: skeleton.maxHp
+      })),
       cycleStartTime: this.cycleStartTime
     });
   }
@@ -311,7 +540,10 @@ export default class BootScene extends Phaser.Scene {
   // for every player in it (including the host), and syncing day/night state.
   applyWorldSnapshot(msg) {
     (msg.players || []).forEach((p) => {
-      if (p.id === this.network.id) return;
+      if (p.id === this.network.id) {
+        this.localAuthoritativeState = p;
+        return;
+      }
       let remote = this.remotePlayers.get(p.id);
       if (!remote) {
         const known = this.network.players.find(pl => pl.id === p.id);
@@ -324,12 +556,47 @@ export default class BootScene extends Phaser.Scene {
     if (typeof msg.cycleStartTime === 'number') {
       this.cycleStartTime = msg.cycleStartTime;
     }
+
+    this.applyMobSnapshot(msg.mobs || []);
   }
 
-  // Guest-only: one-off world events relayed from the host. Placeholder for now —
-  // see class-level note about guests still running their own local world.
+  applyMobSnapshot(mobs) {
+    const byId = new Map(this.skeletons.map(skeleton => [skeleton.networkId, skeleton]));
+    const liveIds = new Set();
+
+    mobs.forEach((state) => {
+      const skeleton = byId.get(state.id);
+      if (!skeleton || state.kind !== skeleton.type) return;
+      liveIds.add(state.id);
+      skeleton.networkTargetX = state.x;
+      skeleton.networkTargetY = state.y;
+      skeleton.hp = Phaser.Math.Clamp(state.hp, 0, skeleton.maxHp);
+      skeleton.hits = skeleton.maxHp - skeleton.hp;
+    });
+
+    this.skeletons.slice().forEach((skeleton) => {
+      if (!liveIds.has(skeleton.networkId)) this.removeSkeleton(skeleton);
+    });
+  }
+
+  // Guest-only: one-off world events relayed from the host. Currently handles the
+  // result of a validated chop/mine intent; see class-level note about guests still
+  // running the rest of their own local world.
   applyWorldEvent(msg) {
-    // Intentionally minimal for now; see class-level note above.
+    if (msg.kind === 'node-hit') this.applyNodeHitEvent(msg);
+  }
+
+  // Guest-only: applies the host's authoritative result of a chop/mine intent —
+  // whichever guest's hit this was, everyone applies the same visual hit/destruction
+  // via hitTarget, but only the guest named in `forId` (the one whose intent this
+  // was) has hitTarget grant the resulting resources, so materials aren't
+  // duplicated across clients.
+  applyNodeHitEvent(msg) {
+    const list = msg.nodeKind === 'tree' ? this.choppableTrees : this.breakableRocks;
+    const target = list.find(t => t.networkId === msg.targetId);
+    if (!target) return;
+
+    this.hitTarget(target, msg.nodeKind, msg.forId === this.network.id);
   }
 
   updateRemotePlayers() {
@@ -354,6 +621,7 @@ export default class BootScene extends Phaser.Scene {
       version: 1,
       player: { x: this.player.x, y: this.player.y },
       inventory: this.inventory,
+      coins: this.coins,
       hotbar: this.hotbar,
       equippedItem: this.equippedItem,
       equippedArmor: this.equippedArmor,
@@ -379,6 +647,7 @@ export default class BootScene extends Phaser.Scene {
     }
 
     if (data.inventory) this.inventory = data.inventory;
+    if (typeof data.coins === 'number') this.setCoins(data.coins);
 
     if (data.hotbar) {
       this.hotbar = data.hotbar;
@@ -479,6 +748,7 @@ export default class BootScene extends Phaser.Scene {
     g.fillCircle(cx, size * 0.36, 10);
 
     this.drawHair(g, hairStyle, cx, size, hairColor);
+    drawHatShape(g, this.characterHat, cx, size);
 
     g.fillStyle(0x2a2a2e, 1);
     g.fillCircle(cx - 3.5, size * 0.41, 1.6);
@@ -1463,6 +1733,273 @@ export default class BootScene extends Phaser.Scene {
     this.scale.on('resize', () => this.positionInventoryPanel());
 
     this.setupHotbar();
+  }
+
+  setupCoinCounter() {
+    this.coins = 0;
+    this.coinCounterText = this.add.text(0, 0, '●  Coins: 0', {
+      fontFamily: 'Arial', fontSize: '16px', fontStyle: 'bold', color: '#ffd84a',
+      backgroundColor: 'rgba(26,26,26,0.85)', padding: { x: 10, y: 6 }
+    }).setOrigin(1, 0).setScrollFactor(0).setDepth(2500000);
+    this.positionCoinCounter();
+    this.scale.on('resize', () => this.positionCoinCounter());
+  }
+
+  positionCoinCounter() {
+    if (!this.coinCounterText) return;
+    this.coinCounterText.setPosition(this.scale.width - 16, this.hpBarMargin + this.hpBarHeight + 10);
+  }
+
+  setCoins(amount) {
+    this.coins = Math.max(0, Math.floor(Number(amount) || 0));
+    if (this.coinCounterText) this.coinCounterText.setText(`●  Coins: ${this.coins}`);
+    if (this.shopPanel?.visible) this.renderShopPage();
+  }
+
+  addCoins(amount) {
+    this.setCoins(this.coins + amount);
+  }
+
+  setupWorldShop() {
+    const rng = new Phaser.Math.RandomDataGenerator([
+      `shop-${this.roomCode || this.worldId || this.worldName || 'world'}`
+    ]);
+    const playerSpawn = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
+    let x = 300;
+    let y = 300;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const candidateX = rng.between(160, WORLD_WIDTH - 160);
+      const candidateY = rng.between(160, WORLD_HEIGHT - 160);
+      const awayFromSpawn = Phaser.Math.Distance.Between(candidateX, candidateY, playerSpawn.x, playerSpawn.y) > 380;
+      const awayFromTrees = !(this.choppableTrees || []).some(tree =>
+        Phaser.Math.Distance.Between(candidateX, candidateY, tree.x, tree.y) < 100
+      );
+      const awayFromRocks = !(this.rockPositions || []).some(rock =>
+        Phaser.Math.Distance.Between(candidateX, candidateY, rock.x, rock.y) < 100
+      );
+      if (awayFromSpawn && awayFromTrees && awayFromRocks) {
+        x = candidateX;
+        y = candidateY;
+        break;
+      }
+    }
+
+    const depth = y;
+    const building = this.add.rectangle(x, y, 100, 62, 0x8b5a2b)
+      .setStrokeStyle(3, 0x4b2d16).setDepth(depth);
+    const roof = this.add.triangle(x, y - 44, 0, 36, 50, 0, 100, 36, 0xb94132)
+      .setStrokeStyle(3, 0x70251e).setDepth(depth + 1);
+    const counter = this.add.rectangle(x, y + 22, 76, 18, 0x5b351c)
+      .setStrokeStyle(2, 0x321b0e).setDepth(depth + 2);
+    const merchant = this.add.circle(x, y - 2, 10, 0xe0ac69).setDepth(depth + 2);
+    const sign = this.add.text(x, y - 31, 'SHOP', {
+      fontFamily: 'Arial', fontSize: '13px', fontStyle: 'bold', color: '#ffe58a',
+      backgroundColor: '#3b2414', padding: { x: 6, y: 3 }
+    }).setOrigin(0.5).setDepth(depth + 3);
+
+    const collider = this.add.zone(x, y, 96, 58);
+    this.physics.add.existing(collider, true);
+    this.physics.add.collider(this.player, collider);
+    this.worldShop = { x, y, building, roof, counter, merchant, sign, collider };
+    this.shopInteractionPoint = { x, y: y + 58 };
+
+    this.shopPromptText = this.add.text(x, y + 64, 'Press E to shop', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#ffffff',
+      backgroundColor: 'rgba(0,0,0,0.7)', padding: { x: 7, y: 4 }
+    }).setOrigin(0.5, 0).setDepth(depth + 4).setVisible(false);
+
+    this.createShopPanel();
+  }
+
+  createShopPanel() {
+    const panelWidth = 430;
+    const panelHeight = 430;
+    this.shopPage = 0;
+    this.shopPanel = this.add.container(0, 0).setScrollFactor(0).setDepth(2800000).setVisible(false);
+    this.shopPanelSize = { width: panelWidth, height: panelHeight };
+
+    const bg = this.add.rectangle(0, 0, panelWidth, panelHeight, 0x171717, 0.96)
+      .setOrigin(0, 0).setStrokeStyle(2, 0xffd84a, 0.8);
+    const title = this.add.text(18, 14, 'TRAVELING SHOP', {
+      fontFamily: 'Arial', fontSize: '20px', fontStyle: 'bold', color: '#ffd84a'
+    });
+    this.shopCoinText = this.add.text(panelWidth - 55, 18, '', {
+      fontFamily: 'Arial', fontSize: '14px', color: '#ffd84a'
+    }).setOrigin(1, 0);
+    const closeHit = this.add.rectangle(panelWidth - 40, 10, 28, 26, 0x4a3030)
+      .setOrigin(0, 0).setInteractive({ useHandCursor: true });
+    const close = this.add.text(panelWidth - 26, 23, 'X', {
+      fontFamily: 'Arial', fontSize: '14px', color: '#ffffff'
+    }).setOrigin(0.5);
+
+    this.shopRows = this.add.container(18, 58);
+    this.shopMessageText = this.add.text(panelWidth / 2, panelHeight - 60, '', {
+      fontFamily: 'Arial', fontSize: '12px', color: '#aaaaaa'
+    }).setOrigin(0.5);
+    this.shopPrevHit = this.add.rectangle(18, panelHeight - 42, 82, 30, 0x343434)
+      .setOrigin(0, 0).setInteractive({ useHandCursor: true });
+    this.shopPrevBtn = this.add.text(59, panelHeight - 27, '< Prev', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#ffffff'
+    }).setOrigin(0.5);
+    this.shopPageText = this.add.text(panelWidth / 2, panelHeight - 34, '', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#cccccc'
+    }).setOrigin(0.5);
+    this.shopNextHit = this.add.rectangle(panelWidth - 100, panelHeight - 42, 82, 30, 0x343434)
+      .setOrigin(0, 0).setInteractive({ useHandCursor: true });
+    this.shopNextBtn = this.add.text(panelWidth - 59, panelHeight - 27, 'Next >', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#ffffff'
+    }).setOrigin(0.5);
+
+    this.shopPanel.add([
+      bg, title, this.shopCoinText, closeHit, close, this.shopRows, this.shopMessageText,
+      this.shopPrevHit, this.shopPrevBtn, this.shopPageText, this.shopNextHit, this.shopNextBtn
+    ]);
+    this.shopCursorKeys = this.input.keyboard.createCursorKeys();
+    this.shopPointerHandler = (pointer) => this.handleShopPointerDown(pointer);
+    this.input.on('pointerdown', this.shopPointerHandler);
+    this.events.once('shutdown', () => {
+      this.input.off('pointerdown', this.shopPointerHandler);
+      this.shopPointerHandler = null;
+    });
+    this.positionShopPanel();
+    this.scale.on('resize', () => this.positionShopPanel());
+    this.renderShopPage();
+  }
+
+  positionShopPanel() {
+    if (!this.shopPanel) return;
+    this.shopPanel.setPosition(
+      (this.scale.width - this.shopPanelSize.width) / 2,
+      (this.scale.height - this.shopPanelSize.height) / 2
+    );
+  }
+
+  updateShopInteraction() {
+    if (!this.worldShop || !this.player) return;
+    const distance = Phaser.Math.Distance.Between(
+      this.player.x, this.player.y, this.shopInteractionPoint.x, this.shopInteractionPoint.y
+    );
+    const nearby = distance < 85;
+    this.shopPromptText.setVisible(nearby && !this.shopPanel.visible);
+    if (nearby && Phaser.Input.Keyboard.JustDown(this.keyE)) {
+      if (this.shopPanel.visible) this.closeShop();
+      else this.openShop();
+    } else if (!nearby && this.shopPanel.visible) {
+      this.closeShop();
+    }
+    if (this.shopPanel.visible && Phaser.Input.Keyboard.JustDown(this.shopCursorKeys.left)) {
+      this.changeShopPage(-1);
+    }
+    if (this.shopPanel.visible && Phaser.Input.Keyboard.JustDown(this.shopCursorKeys.right)) {
+      this.changeShopPage(1);
+    }
+  }
+
+  openShop() {
+    this.shopMessageText.setText('');
+    this.renderShopPage();
+    this.shopPanel.setVisible(true);
+    this.shopPromptText.setVisible(false);
+  }
+
+  closeShop() {
+    if (this.shopPanel) this.shopPanel.setVisible(false);
+  }
+
+  changeShopPage(delta) {
+    const totalPages = Math.ceil(Object.keys(this.itemDefs).length / SHOP_ITEMS_PER_PAGE);
+    this.shopPage = Phaser.Math.Clamp(this.shopPage + delta, 0, totalPages - 1);
+    this.shopMessageText.setText('');
+    this.renderShopPage();
+  }
+
+  handleShopPointerDown(pointer) {
+    if (!this.shopPanel?.visible) return;
+    const localX = pointer.x - this.shopPanel.x;
+    const localY = pointer.y - this.shopPanel.y;
+    const { width, height } = this.shopPanelSize;
+
+    if (localX >= width - 40 && localX <= width - 12 && localY >= 10 && localY <= 36) {
+      this.closeShop();
+      return;
+    }
+    if (localY >= height - 42 && localY <= height - 12) {
+      if (localX >= 18 && localX <= 100) {
+        this.changeShopPage(-1);
+        return;
+      }
+      if (localX >= width - 100 && localX <= width - 18) {
+        this.changeShopPage(1);
+        return;
+      }
+    }
+
+    const rowsX = localX - 18;
+    const rowsY = localY - 58;
+    if (rowsX < 318 || rowsX > 376 || rowsY < 0) return;
+    const rowIndex = Math.floor(rowsY / 43);
+    const withinRowY = rowsY - rowIndex * 43;
+    if (rowIndex < 0 || rowIndex >= SHOP_ITEMS_PER_PAGE || withinRowY < 4 || withinRowY > 33) return;
+
+    const kinds = Object.keys(this.itemDefs);
+    const kind = kinds[this.shopPage * SHOP_ITEMS_PER_PAGE + rowIndex];
+    if (kind) this.buyShopItem(kind);
+  }
+
+  renderShopPage() {
+    if (!this.shopRows) return;
+    this.shopRows.removeAll(true);
+    const kinds = Object.keys(this.itemDefs);
+    const totalPages = Math.max(1, Math.ceil(kinds.length / SHOP_ITEMS_PER_PAGE));
+    this.shopPage = Phaser.Math.Clamp(this.shopPage, 0, totalPages - 1);
+    const visibleKinds = kinds.slice(
+      this.shopPage * SHOP_ITEMS_PER_PAGE,
+      (this.shopPage + 1) * SHOP_ITEMS_PER_PAGE
+    );
+
+    visibleKinds.forEach((kind, index) => {
+      const def = this.itemDefs[kind];
+      const price = SHOP_PRICES[kind] ?? 10;
+      const y = index * 43;
+      const rowBg = this.add.rectangle(0, y, 394, 37, index % 2 ? 0x242424 : 0x202020)
+        .setOrigin(0, 0);
+      const icon = this.add.image(20, y + 18, def.icon).setDisplaySize(24, 24);
+      const label = this.add.text(42, y + 9, def.label, {
+        fontFamily: 'Arial', fontSize: '13px', color: '#ffffff'
+      });
+      const priceText = this.add.text(292, y + 9, `${price}c`, {
+        fontFamily: 'Arial', fontSize: '13px', color: '#ffd84a'
+      }).setOrigin(1, 0);
+      const canAfford = this.coins >= price;
+      const buyHit = this.add.rectangle(318, y + 4, 58, 29, canAfford ? 0x3a6b3a : 0x3a3a3a)
+        .setOrigin(0, 0).setInteractive({ useHandCursor: true });
+      const buy = this.add.text(347, y + 18, 'Buy', {
+        fontFamily: 'Arial', fontSize: '13px', color: canAfford ? '#ffffff' : '#888888'
+      }).setOrigin(0.5);
+      this.shopRows.add([rowBg, icon, label, priceText, buyHit, buy]);
+    });
+
+    this.shopCoinText.setText(`● ${this.coins}`);
+    this.shopPageText.setText(`Page ${this.shopPage + 1} / ${totalPages}`);
+    this.shopPrevBtn.setAlpha(this.shopPage === 0 ? 0.35 : 1);
+    this.shopPrevHit.setAlpha(this.shopPage === 0 ? 0.35 : 1);
+    this.shopNextBtn.setAlpha(this.shopPage === totalPages - 1 ? 0.35 : 1);
+    this.shopNextHit.setAlpha(this.shopPage === totalPages - 1 ? 0.35 : 1);
+  }
+
+  buyShopItem(kind) {
+    const def = this.itemDefs[kind];
+    if (!def) return;
+    const price = SHOP_PRICES[kind] ?? 10;
+    if (this.coins < price) {
+      this.shopMessageText.setColor('#ff7777').setText(`Need ${price - this.coins} more coins`);
+      return;
+    }
+    this.setCoins(this.coins - price);
+    this.inventory[kind] = (this.inventory[kind] || 0) + 1;
+    this.shopMessageText.setColor('#77dd88').setText(`Bought ${def.label}`);
+    if (this.inventoryPanel.visible) this.renderInventoryPage();
+    this.renderShopPage();
   }
 
   setupHotbar() {
@@ -2573,15 +3110,21 @@ export default class BootScene extends Phaser.Scene {
       this.swingEquippedTool();
     }
 
+    const isGuest = this.network && !this.isMultiplayerHost;
+
     if (this.equippedItem === 'axe') {
       const tree = this.findNearestInRange(this.choppableTrees, this.useRange);
-      if (tree) this.hitTarget(tree, 'tree');
+      if (tree) {
+        if (isGuest) this.network.send('input', { inputKind: 'chop', targetId: tree.networkId });
+        else this.hitTarget(tree, 'tree');
+      }
     } else if (this.equippedItem === 'pickaxe') {
       const rock = this.findNearestInRange(this.breakableRocks, this.useRange);
       const obsidian = this.findNearestInRange(this.obsidianDeposits || [], this.useRange);
       if (rock && (!obsidian || Phaser.Math.Distance.Between(this.player.x, this.player.y, rock.x, rock.y) <= Phaser.Math.Distance.Between(this.player.x, this.player.y, obsidian.x, obsidian.y))) {
-        this.hitTarget(rock, 'rock');
-      } else if (obsidian) {
+        if (isGuest) this.network.send('input', { inputKind: 'mine', targetId: rock.networkId });
+        else this.hitTarget(rock, 'rock');
+      } else if (obsidian && !isGuest) {
         this.hitObsidian(obsidian);
       }
     } else if (this.equippedItem === 'sword') {
@@ -2608,7 +3151,7 @@ export default class BootScene extends Phaser.Scene {
     });
   }
 
-  hitTarget(target, kind) {
+  hitTarget(target, kind, grantInventory = true) {
     const maxHits = 5;
     target.hits++;
     this.hitInProgress = true;
@@ -2646,9 +3189,9 @@ export default class BootScene extends Phaser.Scene {
 
     if (target.hits >= maxHits) {
       if (kind === 'tree') {
-        this.destroyTree(target);
+        this.destroyTree(target, grantInventory);
       } else {
-        this.destroyRock(target);
+        this.destroyRock(target, grantInventory);
       }
     }
   }
@@ -2745,14 +3288,19 @@ export default class BootScene extends Phaser.Scene {
     g.strokeCircle(hx, hy, r);
   }
 
-  destroyTree(tree) {
+  // grantInventory is false when applying another player's validated chop (host
+  // relaying to other guests, or a guest applying a world-event for a hit it didn't
+  // land itself) — only the player who actually landed the hit gets the wood.
+  destroyTree(tree, grantInventory = true) {
     tree.sprite.destroy();
     if (tree.damageOverlay) tree.damageOverlay.destroy();
     if (tree.collider) tree.collider.destroy();
     this.choppableTrees.splice(this.choppableTrees.indexOf(tree), 1);
 
-    this.inventory.wood = (this.inventory.wood || 0) + 5;
-    if (this.inventoryPanel.visible) this.renderInventoryPage();
+    if (grantInventory) {
+      this.inventory.wood = (this.inventory.wood || 0) + 5;
+      if (this.inventoryPanel.visible) this.renderInventoryPage();
+    }
   }
 
   generateSkeletonTexture() {
@@ -3275,7 +3823,9 @@ export default class BootScene extends Phaser.Scene {
 
   handleArrowSkeletonHit(skeleton, arrow) {
     if (!arrow || arrow.hit || !skeleton || skeleton.dead) return;
-    if (arrow.source === skeleton) return;
+    // All arrows in arrowGroup are fired by skeleton archers. Let them pass
+    // through every skeleton without damage or retaliation.
+    if (arrow.source) return;
 
     arrow.hit = true;
     const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, skeleton.sprite.x, skeleton.sprite.y);
@@ -3283,9 +3833,6 @@ export default class BootScene extends Phaser.Scene {
     this.damageSkeleton(skeleton);
     this.destroyArrow(arrow);
 
-    if (arrow.source && !arrow.source.dead) {
-      skeleton.hostileTarget = arrow.source;
-    }
   }
 
   damagePlayer(amount) {
@@ -3598,6 +4145,12 @@ export default class BootScene extends Phaser.Scene {
   }
 
   spawnSkeletons() {
+    if (this.peaceful) {
+      this.skeletons = [];
+      this.skeletonBases = [];
+      return;
+    }
+    this.nextSkeletonNetworkId = 1;
     const baseCount = 3;
     const spawnSafeRadius = 100;
     const playerSpawnX = WORLD_WIDTH / 2;
@@ -3635,6 +4188,7 @@ export default class BootScene extends Phaser.Scene {
   // Skeleton horse riders roam freely across the whole map rather than being tied
   // to a base, so they're scattered independently of the base-spawning loop above.
   spawnSkeletonRiders(count, playerSpawnX, playerSpawnY, safeRadius) {
+    if (this.peaceful) return;
     for (let i = 0; i < count; i++) {
       let x, y, attempts = 0;
       do {
@@ -3680,9 +4234,10 @@ export default class BootScene extends Phaser.Scene {
   }
 
   spawnSkeletonAt(baseX, baseY, base, type, count, spreadRadius) {
+    if (this.peaceful) return;
     const textureKey = type === 'archer' ? 'skeleton-archer' : type === 'knight' ? 'skeleton-knight' : type === 'rider' ? 'skeleton-rider' : 'skeleton';
     const maxHp = type === 'knight' ? 10 : type === 'rider' ? 6 : 5;
-    const touchDamage = type === 'knight' ? 2 : type === 'rider' ? 3 : 1;
+    const touchDamage = type === 'knight' ? 2 : type === 'rider' ? 2 : 1;
     const speedMultiplier = type === 'rider' ? 3 : 1;
 
     for (let i = 0; i < count; i++) {
@@ -3704,6 +4259,7 @@ export default class BootScene extends Phaser.Scene {
       this.skeletonGroup.add(sprite);
 
       const skeleton = {
+        networkId: `skeleton-${this.nextSkeletonNetworkId++}`,
         sprite,
         hp: maxHp,
         maxHp,
@@ -3733,9 +4289,12 @@ export default class BootScene extends Phaser.Scene {
   }
 
   updateSkeletons() {
+    if (this.network && !this.isMultiplayerHost) {
+      this.updateGuestSkeletons();
+      return;
+    }
+
     const nightMult = this.nightSpeedMultiplier || 1;
-    const chaseRange = this.isNight ? 300 : 220;
-    const riderChaseRange = this.isNight ? 420 : 340;
     const stopRange = 24;
     const speed = 70 * nightMult;
 
@@ -3790,15 +4349,16 @@ export default class BootScene extends Phaser.Scene {
             this.fireArrow(skeleton);
           }
         } else {
-          this.wanderSkeleton(skeleton, skeletonSpeed);
+          // Always close the distance until the player is within bow range.
+          const angle = Phaser.Math.Angle.Between(sprite.x, sprite.y, this.player.x, this.player.y);
+          sprite.body.setVelocity(Math.cos(angle) * archerSpeed, Math.sin(angle) * archerSpeed);
         }
-      } else if (d < (skeleton.type === 'rider' ? riderChaseRange : chaseRange) && d > stopRange) {
+      } else if (d > stopRange) {
+        // Melee, knight, and rider skeletons pursue the player globally.
         const angle = Phaser.Math.Angle.Between(sprite.x, sprite.y, this.player.x, this.player.y);
         sprite.body.setVelocity(Math.cos(angle) * skeletonSpeed, Math.sin(angle) * skeletonSpeed);
       } else if (d <= stopRange) {
         sprite.body.setVelocity(0, 0);
-      } else {
-        this.wanderSkeleton(skeleton, skeletonSpeed);
       }
 
       sprite.setDepth(sprite.y);
@@ -3810,6 +4370,22 @@ export default class BootScene extends Phaser.Scene {
     });
 
     this.updateArrows();
+  }
+
+  updateGuestSkeletons() {
+    this.skeletons.forEach((skeleton) => {
+      const sprite = skeleton.sprite;
+      sprite.body.setVelocity(0, 0);
+      if (typeof skeleton.networkTargetX === 'number') {
+        sprite.x = Phaser.Math.Linear(sprite.x, skeleton.networkTargetX, 0.35);
+        sprite.y = Phaser.Math.Linear(sprite.y, skeleton.networkTargetY, 0.35);
+      }
+      sprite.setDepth(sprite.y);
+      skeleton.hpBarBg.setPosition(sprite.x, sprite.y - sprite.displayHeight - 6).setDepth(sprite.y + 1);
+      skeleton.hpBarFill.setPosition(sprite.x - 13, sprite.y - sprite.displayHeight - 6).setDepth(sprite.y + 2);
+      skeleton.hpBarFill.width = 26 * Phaser.Math.Clamp(skeleton.hp / skeleton.maxHp, 0, 1);
+      this.updateRiderWalkFrame(skeleton);
+    });
   }
 
   // Swaps the skeleton-rider texture between idle and two gallop frames based on
@@ -3930,10 +4506,22 @@ export default class BootScene extends Phaser.Scene {
       }
     });
     if (!nearest) return;
+
+    if (this.network && !this.isMultiplayerHost) {
+      // Guest: send the attack as an intent for the host to validate and apply;
+      // the host's next snapshot will reflect the resulting hp/removal.
+      this.network.send('input', { inputKind: 'attack', targetId: nearest.networkId });
+      return;
+    }
+
     this.damageSkeleton(nearest);
   }
 
   damageSkeleton(skeleton, amount = 1) {
+    // Until guest combat is represented as an intent handled by the host, do not
+    // let a guest temporarily mutate or destroy an authoritative mob locally.
+    if (this.network && !this.isMultiplayerHost) return;
+
     skeleton.hits += amount;
     skeleton.hp = Math.max(0, skeleton.maxHp - skeleton.hits);
 
@@ -3958,8 +4546,16 @@ export default class BootScene extends Phaser.Scene {
   }
 
   killSkeleton(skeleton) {
+    if (!skeleton || skeleton.dead) return;
     skeleton.dead = true;
+    const rewards = { melee: 1, archer: 2, knight: 3, rider: 5 };
+    this.addCoins(rewards[skeleton.type] || 1);
     this.spawnBoneFragments(skeleton.sprite.x, skeleton.sprite.y);
+    this.removeSkeleton(skeleton);
+  }
+
+  removeSkeleton(skeleton) {
+    skeleton.dead = true;
     skeleton.sprite.destroy();
     skeleton.hpBarBg.destroy();
     skeleton.hpBarFill.destroy();
@@ -4001,17 +4597,19 @@ export default class BootScene extends Phaser.Scene {
     }
   }
 
-  destroyRock(rock) {
+  // See destroyTree for what grantInventory controls.
+  destroyRock(rock, grantInventory = true) {
     rock.sprite.destroy();
     if (rock.damageOverlay) rock.damageOverlay.destroy();
     if (rock.collider) rock.collider.destroy();
     this.breakableRocks.splice(this.breakableRocks.indexOf(rock), 1);
     this.rockPositions = this.rockPositions.filter(r => r.x !== rock.x || r.y !== rock.y);
 
-    this.inventory.stone_chunk = (this.inventory.stone_chunk || 0) + 5;
-    this.inventory.iron_ore = (this.inventory.iron_ore || 0) + 3;
-
-    if (this.inventoryPanel.visible) this.renderInventoryPage();
+    if (grantInventory) {
+      this.inventory.stone_chunk = (this.inventory.stone_chunk || 0) + 5;
+      this.inventory.iron_ore = (this.inventory.iron_ore || 0) + 3;
+      if (this.inventoryPanel.visible) this.renderInventoryPage();
+    }
   }
 
   craftItem(recipe) {
@@ -4064,7 +4662,10 @@ export default class BootScene extends Phaser.Scene {
     player.setCollideWorldBounds(true);
     player.body.setSize(20, 16);
     player.body.setOffset(10, 22);
-    player.setScale(ageToScale(this.characterAge));
+    // Giant characters are exactly 100 world px tall; dwarfs retain the normal
+    // age-based proportions at one-third scale.
+    const normalScale = ageToScale(this.characterAge);
+    player.setScale(this.characterGiant ? 2.5 : this.characterDwarf ? normalScale / 3 : normalScale);
     this.player = player;
 
     (this.treeCollidersPending || []).forEach(zone => {
@@ -4432,7 +5033,7 @@ export default class BootScene extends Phaser.Scene {
         this.rockCollidersPending.push(collider);
       }
 
-      this.breakableRocks.push({ x, y, sprite: rock, collider, hits: 0 });
+      this.breakableRocks.push({ x, y, sprite: rock, collider, hits: 0, networkId: `rock-${i}` });
     }
   }
 
@@ -4508,6 +5109,7 @@ export default class BootScene extends Phaser.Scene {
       if (tooClose) continue;
 
       placed.push({ x, y });
+      const treeIndex = placedCount;
       placedCount++;
 
       const key = this.rngPick(this.treeKeys);
@@ -4523,7 +5125,7 @@ export default class BootScene extends Phaser.Scene {
       this.treeCollidersPending = this.treeCollidersPending || [];
       this.treeCollidersPending.push(collider);
 
-      this.choppableTrees.push({ x, y, sprite: tree, collider, hits: 0 });
+      this.choppableTrees.push({ x, y, sprite: tree, collider, hits: 0, networkId: `tree-${treeIndex}` });
     }
   }
 
@@ -4589,7 +5191,11 @@ export default class BootScene extends Phaser.Scene {
         }
       }
 
+      this.sendLocalMovementInput();
+      this.updateHostGuestStates();
+      this.reconcileLocalPlayer();
       this.player.setDepth(this.player.y);
+      this.updateShopInteraction();
       this.updateNearbyItem();
       this.updateSeating();
       this.updateSmelting();

@@ -9,6 +9,8 @@ function log(...args) {
 }
 
 const MAX_NAME_LENGTH = 20;
+const MAX_CHAT_LENGTH = 200;
+const CHAT_COOLDOWN_MS = 500;
 const MAX_CLIENTS = 6;
 const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I, avoids ambiguity
 
@@ -17,7 +19,7 @@ const COLORS = [0x3f5fd6, 0xd63f3f, 0x3fd670, 0xd6b83f, 0x9a3fd6, 0x3fd6c9];
 // Multiple rooms, each keyed by a short shareable code (see server/PROTOCOL.md).
 // The host's game client is the single source of truth for world state; the server
 // only relays messages, it never runs game logic.
-const rooms = new Map(); // code -> { hostId, clients, started }
+const rooms = new Map(); // code -> { hostId, clients, started, worldConfig }
 
 function send(ws, msg) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -84,7 +86,8 @@ wss.on('connection', (ws, req) => {
     room = {
       hostId: null,
       clients: new Map(),
-      started: false
+      started: false,
+      worldConfig: null
     };
     rooms.set(code, room);
     log(`created room ${code}`);
@@ -93,7 +96,7 @@ wss.on('connection', (ws, req) => {
   const color = COLORS[room.clients.size % COLORS.length];
   const isHost = room.clients.size === 0;
 
-  room.clients.set(id, { ws, color, name });
+  room.clients.set(id, { ws, color, name, lastChatAt: 0 });
   if (isHost) room.hostId = id;
   ws.roomCode = code;
   ws.clientId = id;
@@ -102,7 +105,7 @@ wss.on('connection', (ws, req) => {
 
   send(ws, {
     type: 'welcome', id, isHost, color, name, code,
-    players: playerList(room), started: room.started
+    players: playerList(room), started: room.started, worldConfig: room.worldConfig
   });
   broadcast(room, { type: 'player-joined', id, color, name, isHost }, id);
 
@@ -119,6 +122,25 @@ wss.on('connection', (ws, req) => {
     if (!room) return;
 
     switch (msg.type) {
+      case 'chat-message': {
+        const client = room.clients.get(id);
+        if (!client || typeof msg.text !== 'string') break;
+        const now = Date.now();
+        if (now - client.lastChatAt < CHAT_COOLDOWN_MS) break;
+        const text = msg.text.replace(/[\r\n\t]+/g, ' ').trim().slice(0, MAX_CHAT_LENGTH);
+        if (!text) break;
+        client.lastChatAt = now;
+        broadcast(room, { type: 'chat-message', id, name: client.name, text });
+        break;
+      }
+
+      case 'world-config':
+        if (id === room.hostId) {
+          room.worldConfig = { peaceful: !!msg.peaceful };
+          broadcast(room, { type: 'world-config', ...room.worldConfig }, id);
+        }
+        break;
+
       // Host tells the room the world is up and running (sent once BootScene has loaded).
       case 'start-game':
         if (id === room.hostId && !room.started) {

@@ -21,6 +21,7 @@ export default class NetworkManager {
     this.listeners = {};
     this.roomCode = null;
     this.started = false;
+    this.worldConfig = null;
   }
 
   on(event, callback) {
@@ -83,6 +84,7 @@ export default class NetworkManager {
           this.players = msg.players;
           this.roomCode = msg.code;
           this.started = !!msg.started;
+          this.worldConfig = msg.worldConfig || null;
           this.hostId = msg.isHost ? msg.id : (msg.players.find(p => p.isHost)?.id ?? null);
           if (!settled) {
             settled = true;
@@ -104,6 +106,8 @@ export default class NetworkManager {
           this.players = this.players.filter(p => p.id !== msg.id);
         } else if (msg.type === 'start-game') {
           this.started = true;
+        } else if (msg.type === 'world-config') {
+          this.worldConfig = { peaceful: !!msg.peaceful };
         }
 
         this.emit(msg.type, msg);

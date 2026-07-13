@@ -9,8 +9,11 @@ const DEFAULT_CHARACTER = {
   gender: 'male',
   hair: 'short',
   age: 25,
+  giant: false,
+  dwarf: false,
   skinTone: 0xe8b98a,
-  hairColor: 0x3a2a1e
+  hairColor: 0x3a2a1e,
+  hat: 'none'
 };
 
 function readIndex() {
