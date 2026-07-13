@@ -727,6 +727,53 @@ export default class BootScene extends Phaser.Scene {
       g.destroy();
     }
 
+    // Magic Wand icon: short twig handle with a glowing gem tip.
+    {
+      const size = 26;
+      const g = this.add.graphics();
+      const cx = size / 2;
+      g.lineStyle(2.5, 0x6b4526, 1);
+      g.beginPath();
+      g.moveTo(cx - size * 0.28, size * 0.85);
+      g.lineTo(cx + size * 0.22, size * 0.2);
+      g.strokePath();
+      g.fillStyle(0x9a4fd6, 0.9);
+      g.fillCircle(cx + size * 0.26, size * 0.14, 4.5);
+      g.fillStyle(0xd6b3ff, 1);
+      g.fillCircle(cx + size * 0.26, size * 0.14, 2);
+      g.lineStyle(1, 0xd6b3ff, 0.6);
+      g.strokeCircle(cx + size * 0.26, size * 0.14, 6.5);
+      g.generateTexture('icon-wand', size, size);
+      g.destroy();
+    }
+
+    // Magic Staff icon: longer wood shaft with a larger crystal orb at the top.
+    {
+      const size = 30;
+      const g = this.add.graphics();
+      const cx = size / 2;
+      g.lineStyle(3, 0x5a3a20, 1);
+      g.beginPath();
+      g.moveTo(cx - size * 0.2, size * 0.92);
+      g.lineTo(cx + size * 0.12, size * 0.24);
+      g.strokePath();
+      // Wrapped binding near the top of the shaft.
+      g.lineStyle(1.4, 0x8a5a34, 0.9);
+      g.beginPath();
+      g.moveTo(cx - size * 0.02, size * 0.42);
+      g.lineTo(cx + size * 0.16, size * 0.36);
+      g.strokePath();
+      // Large glowing orb.
+      g.fillStyle(0x4fd6a0, 0.9);
+      g.fillCircle(cx + size * 0.14, size * 0.16, 6.5);
+      g.fillStyle(0xc8ffe8, 1);
+      g.fillCircle(cx + size * 0.14, size * 0.16, 3);
+      g.lineStyle(1.2, 0x4fd6a0, 0.6);
+      g.strokeCircle(cx + size * 0.14, size * 0.16, 9);
+      g.generateTexture('icon-staff', size, size);
+      g.destroy();
+    }
+
     // Craftable arrow icon (matches the enemy arrow projectile look).
     {
       const size = 24;
@@ -1346,6 +1393,8 @@ export default class BootScene extends Phaser.Scene {
       ak47: { label: 'AK-47', icon: 'icon-ak47', equippable: true, handIcon: 'icon-ak47' },
       famas: { label: 'FAMAS', icon: 'icon-famas', equippable: true, handIcon: 'icon-famas' },
       glock17: { label: 'Glock-17', icon: 'icon-glock17', equippable: true, handIcon: 'icon-glock17' },
+      wand: { label: 'Magic Wand', icon: 'icon-wand', equippable: true, handIcon: 'icon-wand' },
+      staff: { label: 'Magic Staff', icon: 'icon-staff', equippable: true, handIcon: 'icon-staff' },
       log_seat: { label: 'Log Seat', icon: 'icon-log-seat' },
       furnace: { label: 'Furnace Kit', icon: 'icon-furnace' },
       iron_ore: { label: 'Iron Ore', icon: 'icon-iron-ore' },
@@ -1385,6 +1434,8 @@ export default class BootScene extends Phaser.Scene {
       { result: 'sword', label: 'Stone Sword', cost: { twig: 1, pebble: 6 } },
       { result: 'string', label: 'String', cost: { wood: 2 } },
       { result: 'bow', label: 'Bow', cost: { string: 1, twig: 3 } },
+      { result: 'wand', label: 'Magic Wand', cost: { twig: 1 } },
+      { result: 'staff', label: 'Magic Staff', cost: { wood: 1, twig: 1, stone_chunk: 1 } },
       { result: 'arrow_item', label: 'Arrow (x3)', cost: { twig: 1, pebble: 1 }, yield: 3 },
       { result: 'log_seat', label: 'Log Seat', cost: { wood: 3 } },
       { result: 'furnace', label: 'Furnace Kit', cost: { stone_chunk: 5 } },
@@ -2568,8 +2619,9 @@ export default class BootScene extends Phaser.Scene {
     if (!this.equippedItem) return;
 
     const isGun = !!this.gunDefs[this.equippedItem];
+    const isMagic = !!this.magicDefs[this.equippedItem];
 
-    if (this.equippedItem !== 'bow' && !isGun) {
+    if (this.equippedItem !== 'bow' && !isGun && !isMagic) {
       this.swingEquippedTool();
     }
 
@@ -2590,6 +2642,8 @@ export default class BootScene extends Phaser.Scene {
       this.firePlayerArrow();
     } else if (isGun) {
       this.fireGun();
+    } else if (isMagic) {
+      this.fireMagic();
     }
   }
 
@@ -3403,6 +3457,7 @@ export default class BootScene extends Phaser.Scene {
     });
 
     this.setupGuns();
+    this.setupMagic();
   }
 
   // Gun Mod weapons: unlimited ammo, reuse the arrow-style hitscan-ish projectile
@@ -3475,6 +3530,75 @@ export default class BootScene extends Phaser.Scene {
     this.destroyBullet(bullet);
   }
 
+  // Magic Wand/Staff: same projectile pattern as guns, but glowing orbs instead of
+  // bullets. The Staff costs more to craft, so it hits harder and fires a bigger bolt.
+  setupMagic() {
+    this.magicDefs = {
+      wand: { damage: 1, fireDelay: 380, boltSpeed: 340, radius: 4, color: 0x9a4fd6, glowColor: 0xd6b3ff },
+      staff: { damage: 3, fireDelay: 650, boltSpeed: 300, radius: 6.5, color: 0x4fd6a0, glowColor: 0xc8ffe8 }
+    };
+
+    this.magicBolts = [];
+    this.magicBoltGroup = this.physics.add.group();
+    this.lastMagicFireTime = 0;
+
+    this.physics.add.overlap(this.skeletonGroup, this.magicBoltGroup, (skeletonSprite, boltSprite) => {
+      this.handleMagicBoltHit(skeletonSprite.enemyRef, boltSprite.magicBoltRef);
+    });
+  }
+
+  fireMagic() {
+    const def = this.magicDefs[this.equippedItem];
+    if (!def) return;
+    if (this.time.now - this.lastMagicFireTime < def.fireDelay) return;
+    this.lastMagicFireTime = this.time.now;
+
+    const pointer = this.input.activePointer;
+    const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+    const angle = Phaser.Math.Angle.Between(this.player.x, this.player.y, worldPoint.x, worldPoint.y);
+
+    const boltSprite = this.add.circle(this.player.x, this.player.y - 10, def.radius, def.glowColor, 1);
+    boltSprite.setStrokeStyle(2, def.color, 0.7);
+    this.physics.add.existing(boltSprite);
+    this.magicBoltGroup.add(boltSprite);
+    boltSprite.body.setAllowGravity(false);
+    boltSprite.body.setCircle(def.radius);
+    boltSprite.body.setVelocity(Math.cos(angle) * def.boltSpeed, Math.sin(angle) * def.boltSpeed);
+
+    const bolt = { sprite: boltSprite, hit: false, spawnTime: this.time.now, damage: def.damage };
+    boltSprite.magicBoltRef = bolt;
+    this.magicBolts.push(bolt);
+  }
+
+  updateMagicBolts() {
+    if (!this.magicBolts) return;
+    const maxLifetime = 1400;
+    this.magicBolts.forEach(bolt => {
+      if (bolt.hit) return;
+      bolt.sprite.setDepth(bolt.sprite.y + 100000);
+      if (this.time.now - bolt.spawnTime > maxLifetime) {
+        this.destroyMagicBolt(bolt);
+      }
+    });
+  }
+
+  destroyMagicBolt(bolt) {
+    if (bolt.destroyed) return;
+    bolt.destroyed = true;
+    bolt.sprite.destroy();
+    this.magicBolts = this.magicBolts.filter(b => b !== bolt);
+  }
+
+  handleMagicBoltHit(skeleton, bolt) {
+    if (!bolt || bolt.hit || !skeleton || skeleton.dead) return;
+
+    bolt.hit = true;
+    const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, skeleton.sprite.x, skeleton.sprite.y);
+    playArrowHitSound(this, dist);
+    this.damageSkeleton(skeleton, bolt.damage);
+    this.destroyMagicBolt(bolt);
+  }
+
   firePlayerArrow() {
     if ((this.inventory.arrow_item || 0) <= 0) return;
 
@@ -3531,9 +3655,10 @@ export default class BootScene extends Phaser.Scene {
     const hasThrowable = this.hotbar.includes('pebble');
     const hasBow = this.equippedItem === 'bow';
     const hasGun = !!this.gunDefs[this.equippedItem];
+    const hasMagic = !!this.magicDefs[this.equippedItem];
     const hasCampfire = this.hotbar.includes('campfire');
     const hasBucket = this.hotbar.includes('bucket_water') || this.hotbar.includes('bucket_lava');
-    if ((!hasThrowable && !hasBow && !hasGun && !hasCampfire && !hasBucket) || this.playerIsDead) {
+    if ((!hasThrowable && !hasBow && !hasGun && !hasMagic && !hasCampfire && !hasBucket) || this.playerIsDead) {
       this.aimReticle.setVisible(false);
       this.aimReticleCross1.setVisible(false);
       this.aimReticleCross2.setVisible(false);
@@ -4602,6 +4727,7 @@ export default class BootScene extends Phaser.Scene {
       this.updateThrownPebbles();
       this.updatePlayerArrows();
       this.updateBullets();
+      this.updateMagicBolts();
       this.updateRemotePlayers();
       this.broadcastWorldSnapshot();
       this.updateClone();
