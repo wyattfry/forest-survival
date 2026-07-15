@@ -89,8 +89,8 @@ export const hotbarMethods = {
   renderHotbar() {
     this.hotbarSlots.forEach((slot, i) => {
       const kind = this.hotbar[i];
-      const isSelectedEquip = kind && this.equippedItem === kind;
-      slot.slotBg.setStrokeStyle(isSelectedEquip ? 2 : 2, isSelectedEquip ? 0xffe066 : 0x555555);
+      const isSelected = kind && (this.equippedItem === kind || this.placementKind === kind);
+      slot.slotBg.setStrokeStyle(2, isSelected ? 0xffe066 : 0x555555);
 
       if (!kind || !this.itemDefs[kind]) {
         slot.icon.setVisible(false);
@@ -102,13 +102,15 @@ export const hotbarMethods = {
       const count = this.inventory[kind] || 0;
 
       if (count <= 0) {
-        this.hotbar[i] = null;
-        slot.icon.setVisible(false);
+        // Keep the slot reserved for this item type so restocking it (crafting or
+        // picking up more) makes it usable again without re-assigning. Shown dimmed
+        // while empty; double-click the slot to free it for something else.
+        slot.icon.setTexture(def.icon).setVisible(true).setAlpha(0.3);
         slot.countLabel.setText('');
         return;
       }
 
-      slot.icon.setTexture(def.icon).setVisible(true);
+      slot.icon.setTexture(def.icon).setVisible(true).setAlpha(1);
       slot.countLabel.setText(def.equippable ? '' : `x${count}`);
     });
   },
@@ -119,10 +121,15 @@ export const hotbarMethods = {
     const def = this.itemDefs[kind];
     if (!def) return;
 
+    // Selecting any other slot cancels an in-progress cursor placement.
+    if (this.placementKind && this.placementKind !== kind) {
+      this.exitPlacementMode();
+    }
+
     if (kind === 'pebble') {
       this.throwPebble();
     } else if (kind === 'campfire') {
-      this.placeCampfire();
+      this.togglePlacementMode('campfire');
     } else if (kind === 'log_seat') {
       this.placeLogSeat();
     } else if (kind === 'furnace') {

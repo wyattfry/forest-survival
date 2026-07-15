@@ -340,6 +340,7 @@ export const playerMethods = {
       this.player.setDepth(this.player.y);
       this.updateShopInteraction();
       this.updateNearbyItem();
+      this.updatePlacementGhost();
       this.updateSeating();
       this.updateSmelting();
       this.updateBucketFill();
@@ -355,7 +356,12 @@ export const playerMethods = {
       this.broadcastWorldSnapshot();
       this.updateClone();
 
+      if (this.placementKind && Phaser.Input.Keyboard.JustDown(this.keyEsc)) {
+        this.exitPlacementMode();
+      }
+
       if (Phaser.Input.Keyboard.JustDown(this.keyQ)) {
+        if (this.placementKind) this.exitPlacementMode();
         this.toggleInventoryPanel();
       }
 

@@ -1,32 +1,90 @@
 import Phaser from 'phaser';
 
 export const buildingMethods = {
-  placeCampfire() {
-    if ((this.inventory.campfire || 0) <= 0) return;
+  // ---- Cursor placement mode -------------------------------------------------
+  // Placeable items (currently the campfire) aren't dropped the instant you press
+  // their hotbar key. Instead the key selects the item (yellow hotbar border) and a
+  // translucent "ghost" follows the cursor, tinted green where it can be placed and
+  // red where it can't. A left-click commits; pressing the key again, choosing
+  // another slot, or Escape cancels.
+  PLACEABLE_GHOSTS: {
+    campfire: { texture: 'campfire', scale: 1.4, animated: true }
+  },
 
+  togglePlacementMode(kind) {
+    if (this.placementKind === kind) {
+      this.exitPlacementMode();
+    } else {
+      this.enterPlacementMode(kind);
+    }
+  },
+
+  enterPlacementMode(kind) {
+    const def = this.PLACEABLE_GHOSTS[kind];
+    if (!def) return;
+    this.exitPlacementMode();
+    this.placementKind = kind;
+
+    const ghost = this.add.sprite(this.player.x, this.player.y, def.texture)
+      .setScale(def.scale)
+      .setAlpha(0.55)
+      .setDepth(1800000.6); // above the night overlay so it's visible after dark
+    if (def.animated) {
+      ghost.play('campfire-burn');
+    }
+    this.placementGhost = ghost;
+    this.renderHotbar();
+  },
+
+  exitPlacementMode() {
+    if (this.placementGhost) {
+      this.placementGhost.destroy();
+      this.placementGhost = null;
+    }
+    if (this.placementKind) {
+      this.placementKind = null;
+      this.renderHotbar();
+    }
+  },
+
+  isPlacementValid(kind, x, y) {
+    if ((this.inventory[kind] || 0) <= 0) return false;
+    const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, x, y);
+    return dist <= this.useRange;
+  },
+
+  updatePlacementGhost() {
+    if (!this.placementKind || !this.placementGhost) return;
     const pointer = this.input.activePointer;
-    const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-    const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, worldPoint.x, worldPoint.y);
-    if (dist > this.useRange) return;
+    const wp = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+    this.placementGhost.setPosition(wp.x, wp.y);
+    const valid = this.isPlacementValid(this.placementKind, wp.x, wp.y);
+    this.placementGhost.setTint(valid ? 0x66ff66 : 0xff5555);
+  },
 
-    this.inventory.campfire--;
+  // Called from the left-click handler while a placement is selected.
+  tryCommitPlacement(pointer) {
+    const kind = this.placementKind;
+    if (!kind) return;
+    const wp = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+    if (!this.isPlacementValid(kind, wp.x, wp.y)) return;
+
+    this.inventory[kind]--;
     this.renderHotbar();
     if (this.inventoryPanel.visible) this.renderInventoryPage();
 
-    const x = worldPoint.x;
-    const y = worldPoint.y;
+    if (kind === 'campfire') this.spawnCampfireAt(wp.x, wp.y);
+    // Stay in placement mode so several can be dropped in a row; the ghost simply
+    // turns red once you run out.
+  },
 
+  spawnCampfireAt(x, y) {
     const glow = this.add.circle(x, y, 15, 0xffa726, 0.18).setDepth(y - 1);
-    const fire = this.add.image(x, y, 'icon-campfire').setScale(1.6).setDepth(y);
+    const fire = this.add.sprite(x, y, 'campfire').setScale(1.4).setDepth(y);
+    fire.play('campfire-burn');
+    // desync fires so a cluster doesn't flicker in lockstep
+    fire.anims.setProgress(Math.random());
 
-    this.tweens.add({
-      targets: fire,
-      scale: { from: 1.5, to: 1.7 },
-      duration: 500,
-      yoyo: true,
-      repeat: -1,
-      ease: 'Sine.easeInOut'
-    });
     this.tweens.add({
       targets: glow,
       alpha: { from: 0.14, to: 0.24 },
@@ -42,7 +100,10 @@ export const buildingMethods = {
     this.physics.add.collider(this.skeletonGroup, collider);
 
     this.placedCampfires = this.placedCampfires || [];
-    this.placedCampfires.push({ x, y, fire, glow, collider });
+    this.placedCampfires.push({
+      x, y, fire, glow, collider,
+      lightPhase: Math.random() * Math.PI * 2
+    });
   },
 
   placeLogSeat() {

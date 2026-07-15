@@ -42,7 +42,8 @@ export const skeletonsMethods = {
     }
 
     this.spawnSkeletonRiders(5, playerSpawnX, playerSpawnY, spawnSafeRadius + 200);
-  },
+  }
+,
 
   // Skeleton horse riders roam freely across the whole map rather than being tied
   // to a base, so they're scattered independently of the base-spawning loop above.
@@ -58,7 +59,8 @@ export const skeletonsMethods = {
 
       this.spawnSkeletonAt(x, y, null, 'rider', 1, 0);
     }
-  },
+  }
+,
 
   buildSkeletonBase(cx, cy) {
     const radius = 130;
@@ -90,7 +92,8 @@ export const skeletonsMethods = {
     const gateSprite = this.add.image(gateX, gateY, 'base-gate').setDepth(gateY).setRotation(gateAngle + Math.PI / 2);
 
     return { x: cx, y: cy, radius, walls, gateSprite };
-  },
+  }
+,
 
   spawnSkeletonAt(baseX, baseY, base, type, count, spreadRadius) {
     if (this.peaceful) return;
@@ -98,6 +101,9 @@ export const skeletonsMethods = {
     const maxHp = type === 'knight' ? 10 : type === 'rider' ? 6 : 5;
     const touchDamage = type === 'knight' ? 2 : type === 'rider' ? 2 : 1;
     const speedMultiplier = type === 'rider' ? 3 : 1;
+    // Max distance at which this type will notice and start chasing the player.
+    // Fast, far-roaming riders spot you from farther; plodding melee from less.
+    const aggroRange = type === 'rider' ? 200 : type === 'archer' ? 160 : type === 'knight' ? 100 : 90;
 
     for (let i = 0; i < count; i++) {
       const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
@@ -127,6 +133,8 @@ export const skeletonsMethods = {
         type,
         touchDamage,
         speedMultiplier,
+        aggroRange,
+        aggro: false,
         homeBase: base,
         lastAttackTime: 0,
         lastShotTime: 0,
@@ -145,7 +153,8 @@ export const skeletonsMethods = {
       (this.treeCollidersPending || []).forEach(zone => this.physics.add.collider(sprite, zone));
       (this.rockCollidersPending || []).forEach(zone => this.physics.add.collider(sprite, zone));
     }
-  },
+  }
+,
 
   updateSkeletons() {
     if (this.network && !this.isMultiplayerHost) {
@@ -195,7 +204,22 @@ export const skeletonsMethods = {
 
       const d = Phaser.Math.Distance.Between(sprite.x, sprite.y, this.player.x, this.player.y);
 
-      if (skeleton.type === 'archer') {
+      // Aggro leash: a skeleton only starts chasing once the player comes within
+      // its aggro range, and keeps chasing until the player breaks past a larger
+      // leash range — then it gives up and drifts back to wandering. Senses reach
+      // farther at night, so daytime gives the player room to escape.
+      const aggroRange = (skeleton.aggroRange || 210) * (this.isNight ? 1.4 : 1);
+      const leashRange = aggroRange * 1.6;
+      if (skeleton.aggro) {
+        if (d > leashRange) skeleton.aggro = false;
+      } else if (d < aggroRange) {
+        skeleton.aggro = true;
+      }
+
+      if (!skeleton.aggro) {
+        // Out of range: patrol near home instead of hunting the player.
+        this.wanderSkeleton(skeleton, skeleton.type === 'archer' ? archerSpeed : skeletonSpeed);
+      } else if (skeleton.type === 'archer') {
         if (d < archerRetreatRange) {
           // Too close: back away from the player.
           const angle = Phaser.Math.Angle.Between(this.player.x, this.player.y, sprite.x, sprite.y);
@@ -208,12 +232,12 @@ export const skeletonsMethods = {
             this.fireArrow(skeleton);
           }
         } else {
-          // Always close the distance until the player is within bow range.
+          // Aggro'd but out of bow range: close the distance.
           const angle = Phaser.Math.Angle.Between(sprite.x, sprite.y, this.player.x, this.player.y);
           sprite.body.setVelocity(Math.cos(angle) * archerSpeed, Math.sin(angle) * archerSpeed);
         }
       } else if (d > stopRange) {
-        // Melee, knight, and rider skeletons pursue the player globally.
+        // Melee, knight, and rider skeletons pursue the aggro'd player.
         const angle = Phaser.Math.Angle.Between(sprite.x, sprite.y, this.player.x, this.player.y);
         sprite.body.setVelocity(Math.cos(angle) * skeletonSpeed, Math.sin(angle) * skeletonSpeed);
       } else if (d <= stopRange) {
@@ -229,7 +253,8 @@ export const skeletonsMethods = {
     });
 
     this.updateArrows();
-  },
+  }
+,
 
   updateGuestSkeletons() {
     this.skeletons.forEach((skeleton) => {
@@ -245,7 +270,8 @@ export const skeletonsMethods = {
       skeleton.hpBarFill.width = 26 * Phaser.Math.Clamp(skeleton.hp / skeleton.maxHp, 0, 1);
       this.updateRiderWalkFrame(skeleton);
     });
-  },
+  }
+,
 
   // Swaps the skeleton-rider texture between idle and two gallop frames based on
   // whether it's currently moving, mirroring the player's walk-cycle approach.
@@ -263,7 +289,8 @@ export const skeletonsMethods = {
     skeleton.nextWalkFrameTime = this.time.now + 110;
     skeleton.walkFrameToggle = !skeleton.walkFrameToggle;
     sprite.setTexture(skeleton.walkFrameToggle ? 'skeleton-rider-walk1' : 'skeleton-rider-walk2');
-  },
+  }
+,
 
   updateHostileSkeleton(skeleton, speed, stopRange) {
     const sprite = skeleton.sprite;
@@ -282,7 +309,8 @@ export const skeletonsMethods = {
         this.damageSkeleton(target);
       }
     }
-  },
+  }
+,
 
   wanderSkeleton(skeleton, speed) {
     const sprite = skeleton.sprite;
@@ -315,7 +343,8 @@ export const skeletonsMethods = {
     } else {
       sprite.body.setVelocity(0, 0);
     }
-  },
+  }
+,
 
   fireArrow(skeleton) {
     const sprite = skeleton.sprite;
@@ -332,7 +361,8 @@ export const skeletonsMethods = {
     const arrow = { sprite: arrowSprite, hit: false, spawnTime: this.time.now, source: skeleton };
     arrowSprite.arrowRef = arrow;
     this.arrows.push(arrow);
-  },
+  }
+,
 
   updateArrows() {
     const maxLifetime = 3000;
@@ -343,14 +373,16 @@ export const skeletonsMethods = {
         this.destroyArrow(arrow);
       }
     });
-  },
+  }
+,
 
   destroyArrow(arrow) {
     if (arrow.destroyed) return;
     arrow.destroyed = true;
     arrow.sprite.destroy();
     this.arrows = this.arrows.filter(a => a !== arrow);
-  },
+  }
+,
 
   attackNearestSkeleton() {
     const range = 50;
@@ -374,7 +406,8 @@ export const skeletonsMethods = {
     }
 
     this.damageSkeleton(nearest);
-  },
+  }
+,
 
   damageSkeleton(skeleton, amount = 1) {
     // Until guest combat is represented as an intent handled by the host, do not
@@ -402,7 +435,8 @@ export const skeletonsMethods = {
     if (skeleton.hits >= skeleton.maxHp) {
       this.killSkeleton(skeleton);
     }
-  },
+  }
+,
 
   killSkeleton(skeleton) {
     if (!skeleton || skeleton.dead) return;
@@ -411,7 +445,8 @@ export const skeletonsMethods = {
     this.addCoins(rewards[skeleton.type] || 1);
     this.spawnBoneFragments(skeleton.sprite.x, skeleton.sprite.y);
     this.removeSkeleton(skeleton);
-  },
+  }
+,
 
   removeSkeleton(skeleton) {
     skeleton.dead = true;
@@ -419,7 +454,8 @@ export const skeletonsMethods = {
     skeleton.hpBarBg.destroy();
     skeleton.hpBarFill.destroy();
     this.skeletons = this.skeletons.filter(s => s !== skeleton);
-  },
+  }
+,
 
   spawnBoneFragments(x, y) {
     const count = Phaser.Math.Between(3, 5);
@@ -454,5 +490,6 @@ export const skeletonsMethods = {
         }
       });
     }
-  },
+  }
+,
 };

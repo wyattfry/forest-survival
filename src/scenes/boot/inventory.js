@@ -455,6 +455,9 @@ export const inventoryMethods = {
     }
     this.inventory[recipe.result] = (this.inventory[recipe.result] || 0) + (recipe.yield || 1);
     this.renderInventoryPage();
+    // Refresh the hotbar so a reserved-but-empty slot (e.g. after placing your
+    // last campfire) lights back up as soon as you craft more.
+    this.renderHotbar();
   },
 
   updateNearbyItem() {
@@ -484,6 +487,7 @@ export const inventoryMethods = {
     if (Phaser.Input.Keyboard.JustDown(this.keyE)) {
       this.inventory[nearest.itemKind] = (this.inventory[nearest.itemKind] || 0) + 1;
       if (this.inventoryPanel.visible) this.renderInventoryPage();
+      this.renderHotbar();
       nearest.destroy();
       this.nearbyItem = null;
       this.promptText.setVisible(false);

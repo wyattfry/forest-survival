@@ -69,6 +69,10 @@ export default class BootScene extends Phaser.Scene {
 
   preload() {
     preloadSounds(this);
+    this.load.spritesheet('campfire', 'assets/sprites/campfire.png', {
+      frameWidth: 32,
+      frameHeight: 32
+    });
   }
 
   create() {
@@ -80,6 +84,14 @@ export default class BootScene extends Phaser.Scene {
     this.generateRockTextures();
     this.generatePlayerTexture();
     this.generateItemTextures();
+    if (!this.anims.exists('campfire-burn')) {
+      this.anims.create({
+        key: 'campfire-burn',
+        frames: this.anims.generateFrameNumbers('campfire', { start: 0, end: 7 }),
+        frameRate: 11,
+        repeat: -1
+      });
+    }
     this.generateLavaTexture();
     this.generateWaterTexture();
     this.generateObsidianTexture();

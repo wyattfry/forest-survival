@@ -45,9 +45,9 @@ export function playArrowShootSound(scene) {
 }
 
 export function playArrowHitSound(scene, distanceFromPlayer) {
-  if (distanceFromPlayer < 120) {
-    scene.sound.play('sfx-arrow-hit', { volume: 0.45, detune: Phaser.Math.Between(-400, 400) });
-  } else if (distanceFromPlayer > 500) {
-    scene.sound.play('sfx-arrow-hit-far', { volume: 0.35, detune: Phaser.Math.Between(-400, 400) });
-  }
+  const isFar = distanceFromPlayer > 500;
+  scene.sound.play(isFar ? 'sfx-arrow-hit-far' : 'sfx-arrow-hit', {
+    volume: isFar ? 0.4 : 0.55,
+    detune: Phaser.Math.Between(-250, 250)
+  });
 }

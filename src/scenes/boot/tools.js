@@ -4,10 +4,17 @@ import { playChopSound } from '../../SoundManager.js';
 export const toolsMethods = {
   setupToolUse() {
     this.useRange = 60;
+    this.placementKind = null;
+    this.placementGhost = null;
+    this.keyEsc = this.input.keyboard.addKey('ESC');
     this.input.on('pointerdown', (pointer) => {
       if (pointer.button !== 0) return;
       if (this.inventoryPanel.visible) return;
       if (this.playerIsDead) return;
+      if (this.placementKind) {
+        this.tryCommitPlacement(pointer);
+        return;
+      }
       this.useEquippedTool();
     });
 
@@ -17,6 +24,11 @@ export const toolsMethods = {
   },
 
   updateToolPrompt() {
+    if (this.placementKind) {
+      this.toolPromptText.setVisible(false);
+      return;
+    }
+
     let target = null;
     let label = '';
     let targetSprite = null;
