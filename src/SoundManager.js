@@ -20,13 +20,12 @@ export function preloadSounds(scene) {
 
   scene.load.audio('sfx-arrow-shoot', 'assets/survival-sounds/arrows/arrowshoot.ogg');
   scene.load.audio('sfx-arrow-hit', 'assets/survival-sounds/arrows/arrowhit.ogg');
-  scene.load.audio('sfx-arrow-hit-near', 'assets/survival-sounds/arrows/arrowhitnear.ogg');
   scene.load.audio('sfx-arrow-hit-far', 'assets/survival-sounds/arrows/arrowhitfar.ogg');
 }
 
 function playRandom(scene, prefix, count, volume) {
   const i = Phaser.Math.Between(1, count);
-  scene.sound.play(`${prefix}-${i}`, { volume });
+  scene.sound.play(`${prefix}-${i}`, { volume, detune: Phaser.Math.Between(-400, 400) });
 }
 
 export function playChopSound(scene) {
@@ -42,15 +41,13 @@ export function playFootstepSound(scene, surface) {
 }
 
 export function playArrowShootSound(scene) {
-  scene.sound.play('sfx-arrow-shoot', { volume: 0.4 });
+  scene.sound.play('sfx-arrow-shoot', { volume: 0.4, detune: Phaser.Math.Between(-400, 400) });
 }
 
 export function playArrowHitSound(scene, distanceFromPlayer) {
   if (distanceFromPlayer < 120) {
-    scene.sound.play('sfx-arrow-hit-near', { volume: 0.5 });
+    scene.sound.play('sfx-arrow-hit', { volume: 0.45, detune: Phaser.Math.Between(-400, 400) });
   } else if (distanceFromPlayer > 500) {
-    scene.sound.play('sfx-arrow-hit-far', { volume: 0.35 });
-  } else {
-    scene.sound.play('sfx-arrow-hit', { volume: 0.45 });
+    scene.sound.play('sfx-arrow-hit-far', { volume: 0.35, detune: Phaser.Math.Between(-400, 400) });
   }
 }
